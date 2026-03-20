@@ -186,13 +186,19 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
     .map(p => `<text x="${p.x}" y="${pad.top + h + 24}" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">${fmtDateShort(p.date)}</text>`)
     .join("\n");
 
-  // Interactive dots with data attributes (no <title>)
-  const dots = points.map(p =>
-    `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#89b4fa" stroke="#1e1e2e" stroke-width="2" class="data-dot"
-       data-tip-date="${fmtDate(p.date)}" data-tip-cost="${fmtCost(p.cost)}" data-tip-msgs="${p.msgs} messages" data-tip-tokens="${fmtTokens(p.tokens)} tokens"/>`
+  // Static dots (small, dimmed — the active one gets highlighted by JS)
+  const dots = points.map((p, i) =>
+    `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="${i}" opacity="0.4"/>`
   ).join("\n");
 
-  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg">
+  // Embed point data as a JSON array for the JS proximity engine
+  const pointData = JSON.stringify(points.map(p => ({
+    x: +p.x.toFixed(1), y: +p.y.toFixed(1),
+    date: fmtDate(p.date), cost: fmtCost(p.cost),
+    msgs: p.msgs + " messages", tokens: fmtTokens(p.tokens) + " tokens"
+  })));
+
+  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points='${pointData}' data-pad-left="${pad.left}" data-pad-top="${pad.top}" data-chart-h="${h}">
     <defs>
       <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.3"/>
@@ -209,6 +215,11 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
     <polyline points="${linePoints}" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     ${xLabels}
     ${dots}
+    <!-- Tracking elements (hidden by default, driven by JS) -->
+    <line id="track-line" x1="0" y1="${pad.top}" x2="0" y2="${pad.top + h}" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>
+    <circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>
+    <!-- Invisible overlay to capture mouse events across the entire chart area -->
+    <rect id="chart-overlay" x="${pad.left}" y="${pad.top}" width="${w}" height="${h}" fill="transparent" style="cursor:crosshair"/>
   </svg>`;
 }
 
@@ -1170,37 +1181,120 @@ body::before {
   const tooltip = document.getElementById('chart-tooltip');
   const tipTitle = document.getElementById('tip-title');
   const tipRows = document.getElementById('tip-rows');
+  const chart = document.getElementById('cost-chart');
+  const trackLine = document.getElementById('track-line');
+  const trackDot = document.getElementById('track-dot');
 
-  function showTooltip(el, e) {
-    const date = el.getAttribute('data-tip-date');
-    const cost = el.getAttribute('data-tip-cost');
-    const msgs = el.getAttribute('data-tip-msgs');
-    const tokens = el.getAttribute('data-tip-tokens');
-
-    if (!date) return;
-
-    tipTitle.textContent = date;
-    tipRows.innerHTML = '';
-
-    if (cost) addRow('Cost', cost);
-    if (msgs) addRow('Messages', msgs);
-    if (tokens) addRow('Tokens', tokens);
-
-    // Position
-    const rect = tooltip.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let x = e.clientX + 14;
-    let y = e.clientY - 10;
-    // Prevent overflow
-    if (x + 180 > vw) x = e.clientX - 180;
-    if (y + 100 > vh) y = e.clientY - 100;
-    if (y < 8) y = 8;
-
-    tooltip.style.left = x + 'px';
-    tooltip.style.top = y + 'px';
-    tooltip.classList.add('visible');
+  // Parse embedded point data from the SVG
+  let chartPoints = [];
+  if (chart) {
+    try { chartPoints = JSON.parse(chart.getAttribute('data-points') || '[]'); } catch(e) {}
   }
+
+  // ── Proximity-based chart interaction ──
+  const overlay = document.getElementById('chart-overlay');
+  let activeIdx = -1;
+
+  if (overlay && chartPoints.length > 0) {
+    overlay.addEventListener('mousemove', function(e) {
+      // Convert mouse position to SVG coordinate space
+      const svg = chart;
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
+
+      // Find nearest point by X distance
+      let minDist = Infinity, nearest = 0;
+      for (let i = 0; i < chartPoints.length; i++) {
+        const dist = Math.abs(chartPoints[i].x - svgPt.x);
+        if (dist < minDist) { minDist = dist; nearest = i; }
+      }
+
+      if (nearest === activeIdx) return; // no change
+      activeIdx = nearest;
+      const p = chartPoints[nearest];
+
+      // Update tracking line + dot
+      trackLine.setAttribute('x1', p.x);
+      trackLine.setAttribute('x2', p.x);
+      trackLine.setAttribute('visibility', 'visible');
+      trackDot.setAttribute('cx', p.x);
+      trackDot.setAttribute('cy', p.y);
+      trackDot.setAttribute('visibility', 'visible');
+
+      // Dim all dots, highlight active
+      chart.querySelectorAll('.data-dot').forEach(function(dot, i) {
+        dot.setAttribute('opacity', i === nearest ? '1' : '0.25');
+        dot.setAttribute('r', i === nearest ? '0' : '3'); // hide under track-dot
+      });
+
+      // Update tooltip content
+      tipTitle.textContent = p.date;
+      tipRows.innerHTML = '';
+      addRow('Cost', p.cost);
+      addRow('Messages', p.msgs);
+      addRow('Tokens', p.tokens);
+
+      // Position tooltip near the data point (in screen coords)
+      const dotScreenPt = svg.createSVGPoint();
+      dotScreenPt.x = p.x;
+      dotScreenPt.y = p.y;
+      const screenPos = dotScreenPt.matrixTransform(svg.getScreenCTM());
+
+      const vw = window.innerWidth;
+      let tx = screenPos.x + 16;
+      let ty = screenPos.y - 40;
+      if (tx + 180 > vw) tx = screenPos.x - 196;
+      if (ty < 8) ty = 8;
+
+      tooltip.style.left = tx + 'px';
+      tooltip.style.top = ty + 'px';
+      tooltip.classList.add('visible');
+    });
+
+    overlay.addEventListener('mouseleave', function() {
+      activeIdx = -1;
+      trackLine.setAttribute('visibility', 'hidden');
+      trackDot.setAttribute('visibility', 'hidden');
+      chart.querySelectorAll('.data-dot').forEach(function(dot) {
+        dot.setAttribute('opacity', '0.4');
+        dot.setAttribute('r', '3');
+      });
+      tooltip.classList.remove('visible');
+    });
+  }
+
+  // ── Generic tooltip for other charts (donut, token bars) ──
+  document.addEventListener('mousemove', function(e) {
+    // Skip if we're inside the area chart (handled above)
+    if (e.target.closest('#cost-chart')) return;
+
+    const target = e.target.closest('[data-tip-date]');
+    if (target) {
+      const date = target.getAttribute('data-tip-date');
+      const cost = target.getAttribute('data-tip-cost');
+      const msgs = target.getAttribute('data-tip-msgs');
+      const tokens = target.getAttribute('data-tip-tokens');
+      if (!date) return;
+
+      tipTitle.textContent = date;
+      tipRows.innerHTML = '';
+      if (cost) addRow('Cost', cost);
+      if (msgs) addRow('Messages', msgs);
+      if (tokens) addRow('Tokens', tokens);
+
+      const vw = window.innerWidth;
+      let x = e.clientX + 14, y = e.clientY - 10;
+      if (x + 180 > vw) x = e.clientX - 180;
+      if (y < 8) y = 8;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top = y + 'px';
+      tooltip.classList.add('visible');
+    } else {
+      tooltip.classList.remove('visible');
+    }
+  });
 
   function addRow(label, value) {
     const row = document.createElement('div');
@@ -1209,21 +1303,9 @@ body::before {
     tipRows.appendChild(row);
   }
 
-  function hideTooltip() {
+  document.addEventListener('mouseleave', function() {
     tooltip.classList.remove('visible');
-  }
-
-  // Bind to all chart elements with data-tip-* attributes
-  document.addEventListener('mousemove', function(e) {
-    const target = e.target.closest('[data-tip-date]');
-    if (target) {
-      showTooltip(target, e);
-    } else {
-      hideTooltip();
-    }
   });
-
-  document.addEventListener('mouseleave', hideTooltip);
 })();
 </script>
 </body>
