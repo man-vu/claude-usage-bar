@@ -2,25 +2,40 @@
 
 Monitor your Claude Code rate limits, API-equivalent costs, and token usage directly in VS Code — with a full analytics dashboard.
 
-![Claude Usage Dashboard](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/icon.png)
+![Dashboard Overview](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/dashboard_image1.png)
 
 ## Features
 
-### Status Bar
-A single status bar item shows your current rate limit utilization at a glance. Hover for a detailed breakdown of rate limits, today's cost, tokens, and model usage.
+### Status Bar & Hover Overlay
+A single status bar item shows your current rate limit utilization at a glance. Hover for a detailed breakdown of rate limits, today's cost, tokens, cache performance, and model usage — all in one card.
+
+![Status Bar Overlay](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/overlay_image.png)
 
 ### Analytics Dashboard
-Press `Ctrl+Alt+C` (or click the status bar) to open the full dashboard with:
+Press `Ctrl+Alt+C` (or click the status bar) to open the full dashboard:
+
+**KPI Cards, Cost Trend & Model Distribution**
+
+![Charts and Models](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/dashboard_image2.png)
 
 - **KPI Cards** — Today's cost, 7-day total, tokens, and messages with sparklines and per-model breakdowns
 - **Interactive Cost Trend** — Area chart with proximity-based hover (move anywhere on the chart to see the nearest data point)
 - **Model Distribution** — Donut chart showing cost split across Opus, Sonnet, and Haiku
 - **Token Usage** — Stacked bar chart with input/output breakdown per day
 - **Cache Performance** — Hit rate, read/write volumes, and estimated savings
+
+**Tool Usage & Activity Heatmap**
+
+![Tool Usage and Activity](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/dashboard_image3.png)
+
 - **Tool Usage** — Ranked breakdown of which tools you use most (Bash, Edit, Read, etc.)
 - **Activity Heatmap** — 24-hour activity pattern showing when you code with Claude
-- **Project Leaderboard** — Per-project cost and message rankings
-- **Daily Breakdown** — Table with mini progress bars and peak day highlighting
+
+**Daily Breakdown**
+
+![Daily Breakdown](https://raw.githubusercontent.com/man-vu/claude-usage-bar/master/images/dashboard_image4.png)
+
+- **Daily Breakdown** — Table with mini progress bars, peak day badge, and per-day cost/token/message stats
 
 ### Subscription Awareness
 Automatically detects your Claude subscription tier (Max 20x, Max 5x, Pro, Free) and displays an info banner explaining that costs shown are API-equivalent estimates — **you are not charged these amounts** on a subscription plan. Shows a value multiplier comparing projected API cost vs. what you actually pay.
