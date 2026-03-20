@@ -976,6 +976,7 @@ body::before {
   .kpi-bottom { grid-template-columns: 1fr; }
   .charts-row { grid-template-columns: 1fr; }
   .secondary-row { grid-template-columns: 1fr; }
+  .insights-row { grid-template-columns: 1fr; }
   .donut-layout { flex-direction: column; }
   .token-gauges { flex-wrap: wrap; }
 }
@@ -1001,20 +1002,27 @@ body::before {
 .table-card { animation-delay: 0.45s; }
 
 /* ── Tool usage bars ── */
-.tool-list { display: flex; flex-direction: column; gap: 4px; }
+.tool-list { display: flex; flex-direction: column; gap: 2px; }
 .tool-row {
   display: grid;
-  grid-template-columns: 100px 1fr 48px 40px;
-  gap: 8px;
+  grid-template-columns: 80px 1fr 42px 34px;
+  gap: 6px;
   align-items: center;
-  padding: 5px 4px;
+  padding: 4px 4px;
   border-radius: 4px;
   transition: background 0.15s;
 }
 .tool-row:hover { background: rgba(255,255,255,0.03); }
-.tool-name { font-size: 0.78rem; font-weight: 500; color: var(--text-primary); }
+.tool-name {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tool-bar-bg {
-  height: 6px;
+  height: 5px;
   background: rgba(255,255,255,0.04);
   border-radius: 3px;
   overflow: hidden;
@@ -1024,46 +1032,68 @@ body::before {
   border-radius: 3px;
   transition: width 0.4s ease;
 }
-.tool-count { font-size: 0.75rem; font-weight: 600; color: var(--text-primary); text-align: right; }
-.tool-pct { font-size: 0.7rem; color: var(--text-secondary); text-align: right; }
+.tool-count { font-size: 0.7rem; font-weight: 600; color: var(--text-primary); text-align: right; }
+.tool-pct { font-size: 0.65rem; color: var(--text-secondary); text-align: right; }
 
 /* ── Hourly heatmap ── */
+.heatmap-wrap { margin-top: 4px; }
 .heatmap-grid {
   display: grid;
   grid-template-columns: repeat(24, 1fr);
-  gap: 3px;
+  gap: 2px;
 }
 .heatmap-cell {
-  aspect-ratio: 1;
   border-radius: 3px;
-  min-height: 18px;
-  transition: opacity 0.2s;
+  height: 28px;
+  transition: opacity 0.2s, transform 0.15s;
   position: relative;
+  cursor: default;
 }
-.heatmap-cell:hover { opacity: 0.8; }
+.heatmap-cell:hover { opacity: 0.85; transform: scaleY(1.15); }
 .heatmap-labels {
   display: grid;
   grid-template-columns: repeat(24, 1fr);
-  gap: 3px;
-  margin-top: 4px;
+  gap: 2px;
+  margin-top: 3px;
 }
 .heatmap-label {
   font-size: 0.55rem;
   color: var(--text-tertiary);
   text-align: center;
 }
+/* Heatmap legend */
+.heatmap-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 0.65rem;
+  color: var(--text-tertiary);
+}
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.heatmap-legend-cell {
+  width: 10px; height: 10px;
+  border-radius: 2px;
+}
 
 /* ── Project leaderboard ── */
+.project-list { display: flex; flex-direction: column; gap: 0; }
 .project-row {
   display: grid;
-  grid-template-columns: 1fr auto auto 80px;
-  gap: 10px;
+  grid-template-columns: 1fr 70px 60px;
+  gap: 8px;
   align-items: center;
-  padding: 7px 4px;
+  padding: 8px 6px;
   border-bottom: 1px solid var(--border-subtle);
+  transition: background 0.15s;
 }
 .project-row:last-child { border-bottom: none; }
 .project-row:hover { background: rgba(255,255,255,0.02); }
+.project-info { min-width: 0; }
 .project-name {
   font-size: 0.78rem;
   font-weight: 500;
@@ -1072,57 +1102,51 @@ body::before {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.project-cost { font-size: 0.78rem; font-weight: 600; color: var(--accent-green); text-align: right; }
-.project-msgs { font-size: 0.72rem; color: var(--text-secondary); text-align: right; }
-.project-bar {
-  height: 5px;
+.project-bar-inline {
+  height: 3px;
+  margin-top: 4px;
   background: rgba(255,255,255,0.04);
-  border-radius: 3px;
+  border-radius: 2px;
   overflow: hidden;
 }
 .project-bar-fill {
   height: 100%;
-  border-radius: 3px;
+  border-radius: 2px;
   background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
 }
+.project-cost { font-size: 0.78rem; font-weight: 600; color: var(--accent-green); text-align: right; }
+.project-msgs { font-size: 0.68rem; color: var(--text-secondary); text-align: right; }
 
-/* ── Refresh button ── */
-.refresh-bar {
-  display: flex;
-  justify-content: center;
-  padding: 12px 0 4px;
-}
+/* ── Refresh button (inline in header) ── */
 .refresh-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 18px;
-  font-size: 0.78rem;
+  gap: 5px;
+  padding: 5px 12px;
+  font-size: 0.72rem;
   font-weight: 600;
   font-family: inherit;
-  color: var(--text-primary);
-  background: rgba(255,255,255,0.05);
+  color: var(--text-secondary);
+  background: rgba(255,255,255,0.04);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 5px;
   cursor: pointer;
   transition: all 0.15s;
 }
 .refresh-btn:hover {
+  color: var(--text-primary);
   background: rgba(137,180,250,0.1);
   border-color: rgba(137,180,250,0.3);
 }
 .refresh-btn svg { transition: transform 0.3s; }
-.refresh-btn:hover svg { transform: rotate(90deg); }
+.refresh-btn:hover svg { transform: rotate(180deg); }
 
 /* ── New sections layout ── */
-.triple-row {
+.insights-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 14px;
   margin-bottom: 14px;
-}
-@media (max-width: 800px) {
-  .triple-row { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -1146,9 +1170,12 @@ body::before {
         <span class="sub-dot" style="background:${subInfo.color}"></span>
         ${subInfo.badge}
       </div>` : ""}
+      <button class="refresh-btn" onclick="(acquireVsCodeApi()).postMessage({command:'refresh'})">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z" fill="currentColor"/></svg>
+        Refresh
+      </button>
       <div class="header-meta">
-        Last 7 days<br>
-        Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        Last 7 days &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </div>
     </div>
   </div>
@@ -1329,8 +1356,8 @@ body::before {
     </div>
   </div>
 
-  <!-- Tool Usage + Hourly Heatmap + Project Leaderboard -->
-  <div class="triple-row">
+  <!-- Tool Usage + Activity Heatmap -->
+  <div class="insights-row">
     <div class="card">
       <div class="section-header">
         <span class="section-title">Tool Usage</span>
@@ -1340,8 +1367,10 @@ body::before {
         ${sortedTools.slice(0, 10).map(([name, count], i) => {
           const pct = totalToolCalls > 0 ? (count / totalToolCalls) * 100 : 0;
           const color = toolColors[i % toolColors.length];
+          // Shorten MCP plugin names: "mcp__plugin_playwright_playwright__browser_click" → "browser_click"
+          const shortName = name.includes("__") ? name.split("__").pop()! : name;
           return `<div class="tool-row">
-            <span class="tool-name">${name}</span>
+            <span class="tool-name" title="${name}">${shortName}</span>
             <div class="tool-bar-bg"><div class="tool-bar-fill" style="width:${pct}%;background:${color}"></div></div>
             <span class="tool-count">${count}</span>
             <span class="tool-pct">${pct.toFixed(0)}%</span>
@@ -1355,33 +1384,51 @@ body::before {
         <span class="section-title">Activity by Hour</span>
         <span class="section-badge">${d.totalSessions} sessions</span>
       </div>
-      <div class="heatmap-grid">
-        ${d.totalHourlyActivity.map((count, h) => {
-          const intensity = maxHourly > 0 ? count / maxHourly : 0;
-          const bg = count === 0
-            ? "rgba(255,255,255,0.03)"
-            : `rgba(137,180,250,${0.15 + intensity * 0.75})`;
-          return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${h}:00–${h}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
-        }).join("\n")}
-      </div>
-      <div class="heatmap-labels">
-        ${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-label">${h % 3 === 0 ? h : ""}</span>`).join("")}
+      <div class="heatmap-wrap">
+        <div class="heatmap-grid">
+          ${d.totalHourlyActivity.map((count, h) => {
+            const intensity = maxHourly > 0 ? count / maxHourly : 0;
+            const bg = count === 0
+              ? "rgba(255,255,255,0.03)"
+              : `rgba(137,180,250,${0.15 + intensity * 0.85})`;
+            return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${String(h).padStart(2, "0")}:00 – ${String(h).padStart(2, "0")}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
+          }).join("\n")}
+        </div>
+        <div class="heatmap-labels">
+          ${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-label">${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`).join("")}
+        </div>
+        <div class="heatmap-footer">
+          <span>Less</span>
+          <div class="heatmap-legend">
+            <div class="heatmap-legend-cell" style="background:rgba(255,255,255,0.03)"></div>
+            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.25)"></div>
+            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.5)"></div>
+            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.75)"></div>
+            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,1)"></div>
+          </div>
+          <span>More</span>
+        </div>
       </div>
     </div>
+  </div>
 
-    <div class="card">
-      <div class="section-header">
-        <span class="section-title">Projects</span>
-        <span class="section-badge">${sortedProjects.length} active</span>
-      </div>
-      ${sortedProjects.slice(0, 8).map(([name, data]) => {
+  <!-- Project Leaderboard (full width) -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="section-header">
+      <span class="section-title">Projects</span>
+      <span class="section-badge">${sortedProjects.length} active</span>
+    </div>
+    <div class="project-list">
+      ${sortedProjects.slice(0, 10).map(([name, data]) => {
         const shortName = name.split("/").pop() ?? name;
         const barPct = maxProjectCost > 0 ? (data.cost / maxProjectCost) * 100 : 0;
         return `<div class="project-row">
-          <span class="project-name" title="${name}">${shortName}</span>
+          <div class="project-info">
+            <div class="project-name" title="${name}">${shortName}</div>
+            <div class="project-bar-inline"><div class="project-bar-fill" style="width:${barPct}%"></div></div>
+          </div>
           <span class="project-cost">${fmtCost(data.cost)}</span>
           <span class="project-msgs">${data.messages} msgs</span>
-          <div class="project-bar"><div class="project-bar-fill" style="width:${barPct}%"></div></div>
         </div>`;
       }).join("\n")}
     </div>
@@ -1409,13 +1456,6 @@ body::before {
     </table>
   </div>
 
-  <!-- Refresh button -->
-  <div class="refresh-bar">
-    <button class="refresh-btn" onclick="(acquireVsCodeApi()).postMessage({command:'refresh'})">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z" fill="currentColor"/></svg>
-      Refresh Dashboard
-    </button>
-  </div>
 
 </div>
 
