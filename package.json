@@ -6,9 +6,12 @@
   "publisher": "your-publisher-name",
   "icon": "images/icon.png",
   "license": "MIT",
+  "sponsor": {
+    "url": "https://buymeacoffee.com/manvu"
+  },
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/claude-usage-bar"
   },
   "engines": {
     "vscode": "^1.85.0"

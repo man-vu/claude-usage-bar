@@ -1001,6 +1001,90 @@ body::before {
 .secondary-row .card:nth-child(2) { animation-delay: 0.4s; }
 .table-card { animation-delay: 0.45s; }
 
+/* ── Donation top strip ── */
+.donate-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 16px;
+  margin-bottom: 16px;
+  background: linear-gradient(90deg, rgba(250,179,135,0.08), rgba(203,166,247,0.08));
+  border: 1px solid rgba(250,179,135,0.1);
+  border-radius: var(--radius);
+  animation: fadeUp 0.3s ease-out both;
+}
+.donate-strip-text {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.donate-strip-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  background: linear-gradient(135deg, #fab387, #cba6f7);
+  border-radius: 4px;
+  text-decoration: none;
+  transition: transform 0.15s;
+}
+.donate-strip-link:hover { transform: translateY(-1px); }
+
+/* ── Donation banner ── */
+.donate-banner {
+  margin-top: 14px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, rgba(250,179,135,0.06), rgba(203,166,247,0.06));
+  border: 1px solid rgba(250,179,135,0.12);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  animation: fadeUp 0.4s ease-out both;
+  animation-delay: 0.5s;
+}
+.donate-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.donate-body { flex: 1; min-width: 0; }
+.donate-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.donate-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.donate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 20px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: inherit;
+  color: #1a1a2e;
+  background: linear-gradient(135deg, #fab387, #cba6f7);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.donate-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(250,179,135,0.3);
+}
+
 /* ── Tool usage bars ── */
 .tool-list { display: flex; flex-direction: column; gap: 2px; }
 .tool-row {
@@ -1178,6 +1262,12 @@ body::before {
         Last 7 days &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </div>
     </div>
+  </div>
+
+  <!-- Donate strip -->
+  <div class="donate-strip">
+    <span class="donate-strip-text">&#9749; Enjoying this extension? Support development</span>
+    <a class="donate-strip-link" href="https://buymeacoffee.com/manvu" target="_blank">Buy me a coffee</a>
   </div>
 
   <!-- Subscription Info Banner -->
@@ -1456,6 +1546,15 @@ body::before {
     </table>
   </div>
 
+  <!-- Support -->
+  <div class="donate-banner">
+    <div class="donate-icon">&#9749;</div>
+    <div class="donate-body">
+      <div class="donate-title">Enjoying Claude Usage Bar?</div>
+      <div class="donate-desc">This extension is free and open-source. If it helps you track your Claude usage, consider buying me a coffee to support continued development.</div>
+      <a class="donate-btn" href="https://buymeacoffee.com/manvu" target="_blank">&#9749; Buy me a coffee</a>
+    </div>
+  </div>
 
 </div>
 
