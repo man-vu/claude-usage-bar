@@ -1,0 +1,104 @@
+{
+  "name": "claude-usage-bar",
+  "displayName": "Claude Usage Bar",
+  "description": "Monitor Claude Code rate limits, costs, and token usage directly in your VS Code status bar with an analytics dashboard",
+  "version": "0.2.0",
+  "publisher": "your-publisher-name",
+  "icon": "images/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeUsageBar.refresh",
+        "title": "Claude Usage: Refresh All"
+      },
+      {
+        "command": "claudeUsageBar.toggle",
+        "title": "Claude Usage: Toggle Status Bar"
+      },
+      {
+        "command": "claudeUsageBar.showDashboard",
+        "title": "Claude Usage: Show Dashboard"
+      },
+      {
+        "command": "claudeUsageBar.scanToday",
+        "title": "Claude Usage: Scan Today's Stats"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "claudeUsageBar.showDashboard",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c"
+      },
+      {
+        "command": "claudeUsageBar.refresh",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Usage Bar",
+      "properties": {
+        "claudeUsageBar.refreshInterval": {
+          "type": "number",
+          "default": 300,
+          "minimum": 60,
+          "description": "Auto-refresh interval in seconds (minimum 60, default 300). The API rate-limits aggressively, so lower values may not help."
+        },
+        "claudeUsageBar.warningThreshold": {
+          "type": "number",
+          "default": 70,
+          "minimum": 10,
+          "maximum": 100,
+          "description": "Usage percentage to show yellow warning"
+        },
+        "claudeUsageBar.criticalThreshold": {
+          "type": "number",
+          "default": 90,
+          "minimum": 10,
+          "maximum": 100,
+          "description": "Usage percentage to show red alert"
+        },
+        "claudeUsageBar.showInStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show usage bar in the status bar"
+        },
+        "claudeUsageBar.dailyBudget": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Daily cost budget in USD (0 = disabled). Status bar turns yellow at 80% and red at 100%."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "sharp": "^0.34.5",
+    "typescript": "^5.3.3"
+  }
+}

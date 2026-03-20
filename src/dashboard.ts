@@ -1,0 +1,1231 @@
+import * as vscode from "vscode";
+import { DailyStats } from "./scanner";
+
+export interface SubscriptionInfo {
+  type: string;  // "max", "pro", "free", "unknown"
+  tier: string;  // "default_claude_max_20x", etc.
+}
+
+export class DashboardPanel {
+  private static instance: DashboardPanel | undefined;
+  private panel: vscode.WebviewPanel;
+  private disposables: vscode.Disposable[] = [];
+
+  private constructor(panel: vscode.WebviewPanel) {
+    this.panel = panel;
+    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+  }
+
+  static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo): DashboardPanel {
+    if (DashboardPanel.instance) {
+      DashboardPanel.instance.panel.reveal(vscode.ViewColumn.One);
+      DashboardPanel.instance.updateContent(stats, sub);
+      return DashboardPanel.instance;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      "claudeUsageDashboard",
+      "Claude Usage Dashboard",
+      vscode.ViewColumn.One,
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+
+    DashboardPanel.instance = new DashboardPanel(panel);
+    DashboardPanel.instance.updateContent(stats, sub);
+    return DashboardPanel.instance;
+  }
+
+  updateContent(stats: DailyStats[], sub?: SubscriptionInfo): void {
+    this.panel.webview.html = buildHtml(stats, sub);
+  }
+
+  private dispose(): void {
+    DashboardPanel.instance = undefined;
+    this.panel.dispose();
+    for (const d of this.disposables) {
+      d.dispose();
+    }
+  }
+}
+
+// ── Subscription helpers ──────────────────────────────────────────────
+
+function formatSubscription(sub?: SubscriptionInfo): { label: string; badge: string; color: string; monthlyPrice: number } {
+  if (!sub || sub.type === "unknown") return { label: "Unknown", badge: "?", color: "#7f849c", monthlyPrice: 0 };
+
+  const tier = sub.tier?.toLowerCase() ?? "";
+  if (sub.type === "max" && tier.includes("20x")) return { label: "Max 20x", badge: "MAX 20x", color: "#cba6f7", monthlyPrice: 200 };
+  if (sub.type === "max" && tier.includes("5x")) return { label: "Max 5x", badge: "MAX 5x", color: "#b4befe", monthlyPrice: 100 };
+  if (sub.type === "max") return { label: "Max", badge: "MAX", color: "#b4befe", monthlyPrice: 100 };
+  if (sub.type === "pro") return { label: "Pro", badge: "PRO", color: "#89b4fa", monthlyPrice: 20 };
+  if (sub.type === "free") return { label: "Free", badge: "FREE", color: "#a6adc8", monthlyPrice: 0 };
+  return { label: sub.type, badge: sub.type.toUpperCase(), color: "#89b4fa", monthlyPrice: 0 };
+}
+
+// ── Data helpers ──────────────────────────────────────────────────────
+
+interface ComputedData {
+  today: DailyStats;
+  yesterday: DailyStats;
+  stats: DailyStats[];
+  totalCost: number;
+  totalMessages: number;
+  totalInput: number;
+  totalOutput: number;
+  totalCacheWrite: number;
+  totalCacheRead: number;
+  avgDailyCost: number;
+  costChange: number;
+  modelTotals: Record<string, { cost: number; messages: number; inputTokens: number; outputTokens: number }>;
+  peakDay: DailyStats;
+  cacheSavings: number;
+}
+
+function emptyDay(date: string): DailyStats {
+  return { date, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, messageCount: 0, modelBreakdown: {} };
+}
+
+function compute(stats: DailyStats[]): ComputedData {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const yd = new Date(); yd.setDate(yd.getDate() - 1);
+  const yesterdayKey = yd.toISOString().slice(0, 10);
+
+  const today = stats.find(s => s.date === todayKey) ?? emptyDay(todayKey);
+  const yesterday = stats.find(s => s.date === yesterdayKey) ?? emptyDay(yesterdayKey);
+  const totalCost = stats.reduce((s, d) => s + d.totalCost, 0);
+  const totalMessages = stats.reduce((s, d) => s + d.messageCount, 0);
+  const totalInput = stats.reduce((s, d) => s + d.inputTokens, 0);
+  const totalOutput = stats.reduce((s, d) => s + d.outputTokens, 0);
+  const totalCacheWrite = stats.reduce((s, d) => s + d.cacheWriteTokens, 0);
+  const totalCacheRead = stats.reduce((s, d) => s + d.cacheReadTokens, 0);
+  const daysWithData = stats.filter(s => s.messageCount > 0).length || 1;
+  const avgDailyCost = totalCost / daysWithData;
+  const costChange = yesterday.totalCost > 0 ? ((today.totalCost - yesterday.totalCost) / yesterday.totalCost) * 100 : 0;
+
+  const modelTotals: Record<string, { cost: number; messages: number; inputTokens: number; outputTokens: number }> = {};
+  for (const day of stats) {
+    for (const [model, data] of Object.entries(day.modelBreakdown)) {
+      if (!modelTotals[model]) modelTotals[model] = { cost: 0, messages: 0, inputTokens: 0, outputTokens: 0 };
+      modelTotals[model].cost += data.cost;
+      modelTotals[model].messages += data.messages;
+      modelTotals[model].inputTokens += data.inputTokens;
+      modelTotals[model].outputTokens += data.outputTokens;
+    }
+  }
+
+  const peakDay = stats.reduce((max, d) => d.totalCost > max.totalCost ? d : max, stats[0] ?? emptyDay(todayKey));
+  const cacheSavings = totalCacheRead * 0.9 * 3 / 1_000_000;
+
+  return { today, yesterday, stats, totalCost, totalMessages, totalInput, totalOutput, totalCacheWrite, totalCacheRead, avgDailyCost, costChange, modelTotals, peakDay, cacheSavings };
+}
+
+// ── Formatters ────────────────────────────────────────────────────────
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return n.toString();
+}
+
+function fmtCost(n: number): string {
+  return n < 10 ? `$${n.toFixed(2)}` : `$${n.toFixed(1)}`;
+}
+
+function fmtModel(model: string): string {
+  // "claude-opus-4-6" → "Opus 4.6"
+  // "claude-haiku-4-5" → "Haiku 4.5"
+  const stripped = model.replace("claude-", "").replace(/-\d{8,}$/, "");
+  const match = stripped.match(/^(\w+)-(\d+)-(\d+)$/);
+  if (match) {
+    return match[1].charAt(0).toUpperCase() + match[1].slice(1) + " " + match[2] + "." + match[3];
+  }
+  // fallback
+  return stripped.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function fmtDate(d: string): string {
+  const dt = new Date(d + "T00:00:00");
+  return dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+function fmtDateShort(d: string): string {
+  const dt = new Date(d + "T00:00:00");
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// ── SVG Charts (with data attributes for JS tooltips) ─────────────────
+
+function buildAreaChart(days: DailyStats[], width: number, height: number): string {
+  if (days.length === 0) return "";
+  const sorted = days.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const max = Math.max(...sorted.map(d => d.totalCost), 0.01);
+  const pad = { top: 20, right: 16, bottom: 36, left: 48 };
+  const w = width - pad.left - pad.right;
+  const h = height - pad.top - pad.bottom;
+
+  const points = sorted.map((d, i) => ({
+    x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w,
+    y: pad.top + h - (d.totalCost / max) * h,
+    cost: d.totalCost,
+    msgs: d.messageCount,
+    tokens: d.inputTokens + d.outputTokens,
+    date: d.date,
+  }));
+
+  const linePoints = points.map(p => `${p.x},${p.y}`).join(" ");
+  const areaPoints = `${pad.left},${pad.top + h} ${linePoints} ${points[points.length - 1].x},${pad.top + h}`;
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map(pct => {
+    const y = pad.top + h - pct * h;
+    const val = pct * max;
+    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+            <text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">${fmtCost(val)}</text>`;
+  }).join("\n");
+
+  const xLabels = points.filter((_, i) => i % Math.max(1, Math.floor(points.length / 7)) === 0 || i === points.length - 1)
+    .map(p => `<text x="${p.x}" y="${pad.top + h + 24}" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">${fmtDateShort(p.date)}</text>`)
+    .join("\n");
+
+  // Interactive dots with data attributes (no <title>)
+  const dots = points.map(p =>
+    `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#89b4fa" stroke="#1e1e2e" stroke-width="2" class="data-dot"
+       data-tip-date="${fmtDate(p.date)}" data-tip-cost="${fmtCost(p.cost)}" data-tip-msgs="${p.msgs} messages" data-tip-tokens="${fmtTokens(p.tokens)} tokens"/>`
+  ).join("\n");
+
+  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg">
+    <defs>
+      <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.3"/>
+        <stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/>
+      </linearGradient>
+      <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#74c7ec"/>
+        <stop offset="50%" stop-color="#89b4fa"/>
+        <stop offset="100%" stop-color="#b4befe"/>
+      </linearGradient>
+    </defs>
+    ${gridLines}
+    <polygon points="${areaPoints}" fill="url(#areaGrad)"/>
+    <polyline points="${linePoints}" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    ${xLabels}
+    ${dots}
+  </svg>`;
+}
+
+function buildDonutChart(models: Record<string, { cost: number; messages: number }>, size: number): string {
+  const sorted = Object.entries(models).sort((a, b) => b[1].cost - a[1].cost);
+  if (sorted.length === 0) return "";
+  const total = sorted.reduce((s, [, d]) => s + d.cost, 0);
+  if (total === 0) return "";
+  const colors = ["#89b4fa", "#a6e3a1", "#fab387", "#f38ba8", "#f9e2af", "#cba6f7", "#94e2d5"];
+  const cx = size / 2, cy = size / 2, r = size / 2 - 8, inner = r * 0.62;
+  let cumAngle = -Math.PI / 2;
+
+  const arcs = sorted.map(([name, data], i) => {
+    const pct = data.cost / total;
+    const angle = pct * Math.PI * 2;
+    const startAngle = cumAngle;
+    cumAngle += angle;
+    const endAngle = cumAngle;
+    const largeArc = angle > Math.PI ? 1 : 0;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+    const ix1 = cx + inner * Math.cos(endAngle), iy1 = cy + inner * Math.sin(endAngle);
+    const ix2 = cx + inner * Math.cos(startAngle), iy2 = cy + inner * Math.sin(startAngle);
+    const color = colors[i % colors.length];
+    return `<path d="M${x1},${y1} A${r},${r} 0 ${largeArc},1 ${x2},${y2} L${ix1},${iy1} A${inner},${inner} 0 ${largeArc},0 ${ix2},${iy2} Z"
+                  fill="${color}" opacity="0.85" class="donut-segment"
+                  data-tip-date="${fmtModel(name)}" data-tip-cost="${fmtCost(data.cost)}" data-tip-msgs="${data.messages} messages" data-tip-tokens="${(pct * 100).toFixed(1)}% of total"/>`;
+  }).join("\n");
+
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="chart-svg">
+    ${arcs}
+    <text x="${cx}" y="${cy - 6}" text-anchor="middle" fill="#cdd6f4" font-size="16" font-weight="700">${fmtCost(total)}</text>
+    <text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">TOTAL</text>
+  </svg>`;
+}
+
+function buildTokenStackedBars(days: DailyStats[], width: number, height: number): string {
+  const sorted = days.slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length === 0) return "";
+  const maxTokens = Math.max(...sorted.map(d => d.inputTokens + d.outputTokens), 1);
+  const pad = { top: 12, right: 16, bottom: 32, left: 8 };
+  const w = width - pad.left - pad.right;
+  const h = height - pad.top - pad.bottom;
+  const barW = Math.min(w / sorted.length - 4, 32);
+  const gap = (w - barW * sorted.length) / (sorted.length + 1);
+
+  const bars = sorted.map((d, i) => {
+    const x = pad.left + gap + i * (barW + gap);
+    const totalH = ((d.inputTokens + d.outputTokens) / maxTokens) * h;
+    const inputH = (d.inputTokens / (d.inputTokens + d.outputTokens || 1)) * totalH;
+    const outputH = totalH - inputH;
+    const baseY = pad.top + h;
+    return `<g class="bar-group"
+              data-tip-date="${fmtDate(d.date)}" data-tip-cost="Input: ${fmtTokens(d.inputTokens)}" data-tip-msgs="Output: ${fmtTokens(d.outputTokens)}" data-tip-tokens="Total: ${fmtTokens(d.inputTokens + d.outputTokens)}">
+            <rect x="${x}" y="${baseY - totalH}" width="${barW}" height="${inputH}" rx="3" fill="#89b4fa" opacity="0.7"/>
+            <rect x="${x}" y="${baseY - outputH}" width="${barW}" height="${outputH}" rx="0" fill="#a6e3a1" opacity="0.7"/>
+            <rect x="${x}" y="${baseY - totalH}" width="${barW}" height="${totalH}" rx="3" fill="transparent" class="bar-hover-target"/>
+            </g>
+            <text x="${x + barW / 2}" y="${baseY + 16}" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">${fmtDateShort(d.date)}</text>`;
+  }).join("\n");
+
+  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg">
+    ${bars}
+  </svg>`;
+}
+
+function buildSparkline(values: number[], w: number, h: number, color: string): string {
+  if (values.length < 2) return "";
+  const max = Math.max(...values, 0.01);
+  const pts = values.map((v, i) =>
+    `${(i / (values.length - 1)) * w},${h - (v / max) * (h - 4)}`
+  ).join(" ");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+  </svg>`;
+}
+
+function buildRingGauge(value: number, total: number, size: number, color: string, bgColor: string = "rgba(255,255,255,0.06)"): string {
+  const r = (size - 6) / 2;
+  const cx = size / 2, cy = size / 2;
+  const circumference = 2 * Math.PI * r;
+  const pct = total > 0 ? value / total : 0;
+  const dashOffset = circumference * (1 - pct);
+
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="token-gauge-ring">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${bgColor}" stroke-width="5"/>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="5"
+      stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}"
+      stroke-linecap="round" transform="rotate(-90 ${cx} ${cy})"
+      style="transition: stroke-dashoffset 0.6s ease"/>
+    <text x="${cx}" y="${cy + 3}" text-anchor="middle" fill="${color}" font-size="9" font-weight="700">${total > 0 ? (pct * 100).toFixed(0) : 0}%</text>
+  </svg>`;
+}
+
+// ── Main HTML builder ─────────────────────────────────────────────────
+
+function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
+  const d = compute(stats);
+  const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const costSparkValues = chartDays.map(s => s.totalCost);
+  const msgSparkValues = chartDays.map(s => s.messageCount);
+  const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens);
+
+  const changeIcon = d.costChange > 0 ? "&#9650;" : d.costChange < 0 ? "&#9660;" : "&#8226;";
+  const changeColor = d.costChange > 0 ? "#f38ba8" : d.costChange < 0 ? "#a6e3a1" : "rgba(255,255,255,0.4)";
+  const changeText = d.costChange !== 0 ? `${Math.abs(d.costChange).toFixed(0)}% vs yesterday` : "same as yesterday";
+
+  const modelColors = ["#89b4fa", "#a6e3a1", "#fab387", "#f38ba8", "#f9e2af", "#cba6f7", "#94e2d5"];
+
+  // Today's model breakdown for KPI card
+  const todayModels = Object.entries(d.today.modelBreakdown).sort((a, b) => b[1].cost - a[1].cost);
+  const todayMaxCost = todayModels.length > 0 ? todayModels[0][1].cost : 1;
+  const todayModelBars = todayModels.map(([name, data], i) => {
+    const color = modelColors[i % modelColors.length];
+    const pct = todayMaxCost > 0 ? (data.cost / todayMaxCost) * 100 : 0;
+    return `<div class="kpi-model-row">
+      <span class="kpi-model-name">${fmtModel(name)}</span>
+      <div class="kpi-model-bar-bg"><div class="kpi-model-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="kpi-model-cost">${fmtCost(data.cost)} <span style="color:var(--text-tertiary);font-weight:400">(${data.messages})</span></span>
+    </div>`;
+  }).join("\n");
+
+  // Today's token data for ring gauges
+  const todayTotalTokens = d.today.inputTokens + d.today.outputTokens;
+  const todayCacheTotal = d.today.cacheWriteTokens + d.today.cacheReadTokens;
+  const sortedModels = Object.entries(d.modelTotals).sort((a, b) => b[1].cost - a[1].cost);
+  const modelLegend = sortedModels.map(([name, data], i) => {
+    const color = modelColors[i % modelColors.length];
+    const pct = d.totalCost > 0 ? ((data.cost / d.totalCost) * 100).toFixed(0) : "0";
+    return `<div class="legend-item">
+      <span class="legend-dot" style="background:${color}"></span>
+      <span class="legend-name">${fmtModel(name)}</span>
+      <span class="legend-val">${fmtCost(data.cost)}</span>
+      <span class="legend-pct">${pct}%</span>
+    </div>`;
+  }).join("\n");
+
+  const dailyRows = d.stats.map(day => {
+    const isToday = day.date === d.today.date;
+    return `<tr class="${isToday ? "row-today" : ""}">
+      <td class="cell-date">${fmtDate(day.date)}${isToday ? '<span class="badge-today">TODAY</span>' : ""}</td>
+      <td class="cell-cost">${fmtCost(day.totalCost)}</td>
+      <td class="cell-tokens">${fmtTokens(day.inputTokens + day.outputTokens)}</td>
+      <td class="cell-msgs">${day.messageCount}</td>
+      <td class="cell-bar"><div class="mini-bar"><div class="mini-bar-fill" style="width:${d.peakDay.totalCost > 0 ? (day.totalCost / d.peakDay.totalCost * 100) : 0}%"></div></div></td>
+    </tr>`;
+  }).join("\n");
+
+  // Subscription info
+  const subInfo = formatSubscription(sub);
+  const isSubscription = sub && sub.type !== "unknown" && sub.type !== "free";
+  const projectedMonthly = d.avgDailyCost * 30;
+
+  return /*html*/ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Usage Dashboard</title>
+<style>
+/* ── Design tokens ── */
+:root {
+  --bg-base: #0f0f1a;
+  --bg-surface: rgba(30, 30, 52, 0.65);
+  --bg-surface-hover: rgba(40, 40, 70, 0.8);
+  --bg-elevated: rgba(50, 50, 85, 0.45);
+  --text-primary: #e2e8f0;
+  --text-secondary: rgba(255, 255, 255, 0.5);
+  --text-tertiary: rgba(255, 255, 255, 0.3);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-subtle: rgba(255, 255, 255, 0.03);
+  --accent-blue: #89b4fa;
+  --accent-green: #a6e3a1;
+  --accent-peach: #fab387;
+  --accent-red: #f38ba8;
+  --accent-yellow: #f9e2af;
+  --accent-purple: #cba6f7;
+  --accent-teal: #94e2d5;
+  --glow-blue: rgba(137, 180, 250, 0.15);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --radius-xs: 6px;
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 10%, rgba(137,180,250,0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 50% at 80% 80%, rgba(166,227,161,0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(203,166,247,0.04) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dashboard {
+  position: relative;
+  z-index: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 24px 48px;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+}
+.header-left { display: flex; align-items: center; gap: 14px; }
+.logo {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 800; color: #fff;
+  box-shadow: 0 4px 16px rgba(137,180,250,0.25);
+}
+.header h1 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--text-primary), var(--accent-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.header-right { display: flex; align-items: center; gap: 14px; }
+.header-meta {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  text-align: right;
+  line-height: 1.6;
+}
+
+/* Subscription badge */
+.sub-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04);
+  backdrop-filter: blur(8px);
+}
+.sub-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Subscription banner ── */
+.sub-banner {
+  background: linear-gradient(135deg, rgba(137,180,250,0.08), rgba(203,166,247,0.06));
+  border: 1px solid rgba(137,180,250,0.12);
+  border-radius: var(--radius);
+  padding: 16px 22px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.sub-banner-icon {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.sub-banner-text {
+  flex: 1;
+}
+.sub-banner-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+  margin-bottom: 4px;
+}
+.sub-banner-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.sub-banner-highlight {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+.sub-banner-savings {
+  display: flex;
+  gap: 20px;
+  margin-top: 10px;
+}
+.sub-stat {
+  text-align: center;
+}
+.sub-stat-val {
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.sub-stat-label {
+  font-size: 0.6rem;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Glass card ── */
+.card {
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.card:hover {
+  border-color: rgba(255,255,255,0.1);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+/* ── KPI Hero Cards ── */
+.kpi-top {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.kpi-bottom {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.kpi-card { position: relative; overflow: hidden; }
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.kpi-card.kpi-cost::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-teal)); }
+.kpi-card.kpi-week::before { background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple)); }
+.kpi-card.kpi-tokens::before { background: linear-gradient(90deg, var(--accent-peach), var(--accent-yellow)); }
+.kpi-card.kpi-msgs::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-red)); }
+
+.kpi-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.kpi-header-left { flex: 1; }
+.kpi-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.kpi-value {
+  font-size: 1.9rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+.kpi-cost .kpi-value { color: var(--accent-green); }
+.kpi-week .kpi-value { color: var(--accent-blue); }
+.kpi-tokens .kpi-value { color: var(--accent-peach); }
+.kpi-msgs .kpi-value { color: var(--accent-purple); }
+.kpi-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+.kpi-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-weight: 600;
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+}
+.kpi-sparkline {
+  flex-shrink: 0;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
+/* Model mini-breakdown inside KPI */
+.kpi-breakdown {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.kpi-model-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 0;
+}
+.kpi-model-name {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.kpi-model-bar-bg {
+  height: 6px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.kpi-model-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.kpi-model-cost {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: right;
+  white-space: nowrap;
+  min-width: 52px;
+}
+
+/* Token ring gauge */
+.token-gauges {
+  display: flex;
+  gap: 20px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.token-gauge {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.token-gauge-ring {
+  flex-shrink: 0;
+}
+.token-gauge-info {
+  flex: 1;
+  min-width: 0;
+}
+.token-gauge-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+.token-gauge-val {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+.token-gauge-sub {
+  font-size: 0.65rem;
+  color: var(--text-tertiary);
+}
+
+/* ── Chart section ── */
+.charts-row {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.section-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.section-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(137,180,250,0.1);
+  color: var(--accent-blue);
+}
+.chart-container {
+  width: 100%;
+  overflow: hidden;
+}
+.donut-layout {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.legend { flex: 1; }
+.legend-item {
+  display: grid;
+  grid-template-columns: 10px 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.legend-item:last-child { border-bottom: none; }
+.legend-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.legend-name { font-size: 0.78rem; font-weight: 500; color: var(--text-primary); }
+.legend-val { font-size: 0.78rem; font-weight: 600; color: var(--text-primary); text-align: right; }
+.legend-pct { font-size: 0.7rem; color: var(--text-secondary); text-align: right; min-width: 28px; }
+
+/* ── Secondary Row ── */
+.secondary-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.token-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+}
+.token-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+.token-legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+.cache-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.cache-stat {
+  text-align: center;
+  padding: 14px 8px;
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+.cache-stat-val {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--accent-teal);
+  line-height: 1.2;
+}
+.cache-stat-label {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Daily breakdown table ── */
+.table-card { padding: 18px; }
+.daily-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.daily-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+.daily-table td {
+  padding: 10px 12px;
+  font-size: 0.82rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.daily-table tr:hover td { background: rgba(255,255,255,0.02); }
+.row-today td { background: rgba(137,180,250,0.04) !important; }
+.cell-date {
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.badge-today {
+  font-size: 0.55rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+.cell-cost { font-weight: 600; color: var(--accent-green); }
+.cell-tokens { color: var(--accent-peach); }
+.cell-msgs { color: var(--text-secondary); }
+.mini-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.mini-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+  transition: width 0.3s;
+}
+
+/* ── Custom Tooltip ── */
+#chart-tooltip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  background: rgba(15, 15, 30, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(137,180,250,0.08);
+  min-width: 140px;
+}
+#chart-tooltip.visible { opacity: 1; }
+.tip-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent-blue);
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+.tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 0.7rem;
+  line-height: 1.7;
+}
+.tip-label { color: var(--text-secondary); }
+.tip-value { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+
+/* ── SVG interactions ── */
+.data-dot { transition: r 0.15s, filter 0.15s; cursor: pointer; }
+.data-dot:hover { r: 7; filter: drop-shadow(0 0 6px rgba(137,180,250,0.6)); }
+.donut-segment { transition: opacity 0.15s, filter 0.15s; cursor: pointer; }
+.donut-segment:hover { opacity: 1 !important; filter: drop-shadow(0 0 8px rgba(255,255,255,0.15)); }
+.bar-hover-target { cursor: pointer; }
+.bar-group:hover rect:not(.bar-hover-target) { opacity: 1 !important; filter: brightness(1.2); }
+
+/* ── Responsive ── */
+@media (max-width: 800px) {
+  .kpi-top { grid-template-columns: 1fr; }
+  .kpi-bottom { grid-template-columns: 1fr; }
+  .charts-row { grid-template-columns: 1fr; }
+  .secondary-row { grid-template-columns: 1fr; }
+  .donut-layout { flex-direction: column; }
+  .token-gauges { flex-wrap: wrap; }
+}
+@media (max-width: 500px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+  .dashboard { padding: 16px 12px; }
+}
+
+/* ── Animated entry ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.card, .sub-banner { animation: fadeUp 0.4s ease-out both; }
+.kpi-top .card:nth-child(1) { animation-delay: 0.05s; }
+.kpi-top .card:nth-child(2) { animation-delay: 0.1s; }
+.kpi-bottom .card:nth-child(1) { animation-delay: 0.15s; }
+.kpi-bottom .card:nth-child(2) { animation-delay: 0.2s; }
+.charts-row .card:nth-child(1) { animation-delay: 0.25s; }
+.charts-row .card:nth-child(2) { animation-delay: 0.3s; }
+.secondary-row .card:nth-child(1) { animation-delay: 0.35s; }
+.secondary-row .card:nth-child(2) { animation-delay: 0.4s; }
+.table-card { animation-delay: 0.45s; }
+</style>
+</head>
+<body>
+<div class="dashboard">
+
+  <!-- Tooltip container -->
+  <div id="chart-tooltip">
+    <div class="tip-title" id="tip-title"></div>
+    <div id="tip-rows"></div>
+  </div>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">C</div>
+      <h1>Claude Usage Dashboard</h1>
+    </div>
+    <div class="header-right">
+      ${sub && sub.type !== "unknown" ? `<div class="sub-badge" style="color:${subInfo.color}; border-color:${subInfo.color}33">
+        <span class="sub-dot" style="background:${subInfo.color}"></span>
+        ${subInfo.badge}
+      </div>` : ""}
+      <div class="header-meta">
+        Last 7 days<br>
+        Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </div>
+    </div>
+  </div>
+
+  <!-- Subscription Info Banner -->
+  ${isSubscription ? `
+  <div class="sub-banner">
+    <div class="sub-banner-icon">&#9889;</div>
+    <div class="sub-banner-text">
+      <div class="sub-banner-title">You're on Claude ${subInfo.label} (${subInfo.monthlyPrice > 0 ? "$" + subInfo.monthlyPrice + "/mo" : "subscription"})</div>
+      <div class="sub-banner-desc">
+        Costs shown are <strong>API-equivalent estimates</strong> &mdash; what you'd pay if billed per-token via the Anthropic API.
+        Since you're on a <span class="sub-banner-highlight">fixed-price subscription</span>, you are <strong>not charged</strong> these amounts.
+        This helps you understand your usage intensity and how much value you're getting from your plan.
+      </div>
+      <div class="sub-banner-savings">
+        <div class="sub-stat">
+          <div class="sub-stat-val" style="color:var(--accent-green)">${fmtCost(projectedMonthly)}</div>
+          <div class="sub-stat-label">Projected Monthly (API)</div>
+        </div>
+        <div class="sub-stat">
+          <div class="sub-stat-val" style="color:var(--accent-purple)">$${subInfo.monthlyPrice}</div>
+          <div class="sub-stat-label">You Actually Pay</div>
+        </div>
+        ${projectedMonthly > subInfo.monthlyPrice ? `<div class="sub-stat">
+          <div class="sub-stat-val" style="color:var(--accent-teal)">${((projectedMonthly / subInfo.monthlyPrice - 1) * 100).toFixed(0)}%</div>
+          <div class="sub-stat-label">Value Multiplier</div>
+        </div>` : ""}
+      </div>
+    </div>
+  </div>
+  ` : ""}
+
+  <!-- KPI Hero Cards — Top Row: Today's Cost + Today's Tokens (expanded) -->
+  <div class="kpi-top">
+    <div class="card kpi-card kpi-cost">
+      <div class="kpi-header">
+        <div class="kpi-header-left">
+          <div class="kpi-label">Today's Cost${isSubscription ? " (API equiv.)" : ""}</div>
+          <div class="kpi-value">${fmtCost(d.today.totalCost)}</div>
+          <div class="kpi-sub">
+            <span class="kpi-change" style="color:${changeColor}">${changeIcon} ${changeText}</span>
+            <span style="color:var(--text-tertiary)">&middot; ${d.today.messageCount} msgs</span>
+          </div>
+        </div>
+        <div class="kpi-sparkline">${buildSparkline(costSparkValues, 80, 36, "rgba(166,227,161,0.6)")}</div>
+      </div>
+      ${todayModelBars ? `<div class="kpi-breakdown">${todayModelBars}</div>` : ""}
+    </div>
+
+    <div class="card kpi-card kpi-tokens">
+      <div class="kpi-header">
+        <div class="kpi-header-left">
+          <div class="kpi-label">Tokens Today</div>
+          <div class="kpi-value">${fmtTokens(todayTotalTokens)}</div>
+          <div class="kpi-sub">across ${d.today.messageCount} messages</div>
+        </div>
+        <div class="kpi-sparkline">${buildSparkline(tokenSparkValues, 80, 36, "rgba(250,179,135,0.6)")}</div>
+      </div>
+      <div class="token-gauges">
+        <div class="token-gauge">
+          ${buildRingGauge(d.today.inputTokens, todayTotalTokens, 48, "#89b4fa")}
+          <div class="token-gauge-info">
+            <div class="token-gauge-label">Input</div>
+            <div class="token-gauge-val">${fmtTokens(d.today.inputTokens)}</div>
+          </div>
+        </div>
+        <div class="token-gauge">
+          ${buildRingGauge(d.today.outputTokens, todayTotalTokens, 48, "#a6e3a1")}
+          <div class="token-gauge-info">
+            <div class="token-gauge-label">Output</div>
+            <div class="token-gauge-val">${fmtTokens(d.today.outputTokens)}</div>
+          </div>
+        </div>
+        <div class="token-gauge">
+          ${buildRingGauge(d.today.cacheReadTokens, d.today.cacheReadTokens + d.today.cacheWriteTokens || 1, 48, "#94e2d5")}
+          <div class="token-gauge-info">
+            <div class="token-gauge-label">Cache</div>
+            <div class="token-gauge-val">${fmtTokens(todayCacheTotal)}</div>
+            <div class="token-gauge-sub">${fmtTokens(d.today.cacheReadTokens)} read</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPI Bottom Row: 7-Day Total + Messages -->
+  <div class="kpi-bottom">
+    <div class="card kpi-card kpi-week">
+      <div class="kpi-header">
+        <div class="kpi-header-left">
+          <div class="kpi-label">7-Day Total</div>
+          <div class="kpi-value">${fmtCost(d.totalCost)}</div>
+          <div class="kpi-sub">avg ${fmtCost(d.avgDailyCost)}/day &middot; peak ${fmtCost(d.peakDay.totalCost)}</div>
+        </div>
+        <div class="kpi-sparkline">${buildSparkline(costSparkValues, 80, 36, "rgba(137,180,250,0.6)")}</div>
+      </div>
+    </div>
+    <div class="card kpi-card kpi-msgs">
+      <div class="kpi-header">
+        <div class="kpi-header-left">
+          <div class="kpi-label">Messages This Week</div>
+          <div class="kpi-value">${d.totalMessages}</div>
+          <div class="kpi-sub">${d.today.messageCount} today &middot; ${fmtTokens(d.totalInput + d.totalOutput)} tokens total</div>
+        </div>
+        <div class="kpi-sparkline">${buildSparkline(msgSparkValues, 80, 36, "rgba(203,166,247,0.6)")}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Charts Row -->
+  <div class="charts-row">
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Cost Trend${isSubscription ? " (API Equivalent)" : ""}</span>
+        <span class="section-badge">7 DAYS</span>
+      </div>
+      <div class="chart-container">
+        ${buildAreaChart(chartDays, 600, 200)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Model Distribution</span>
+      </div>
+      <div class="donut-layout">
+        ${buildDonutChart(d.modelTotals, 140)}
+        <div class="legend">
+          ${modelLegend}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Secondary Row -->
+  <div class="secondary-row">
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Token Usage</span>
+        <span class="section-badge">${fmtTokens(d.totalInput + d.totalOutput)} TOTAL</span>
+      </div>
+      <div class="chart-container">
+        ${buildTokenStackedBars(chartDays, 480, 150)}
+      </div>
+      <div class="token-legend">
+        <div class="token-legend-item">
+          <span class="token-legend-dot" style="background:var(--accent-blue)"></span>
+          Input ${fmtTokens(d.totalInput)}
+        </div>
+        <div class="token-legend-item">
+          <span class="token-legend-dot" style="background:var(--accent-green)"></span>
+          Output ${fmtTokens(d.totalOutput)}
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Cache Performance</span>
+      </div>
+      <div class="cache-grid">
+        <div class="cache-stat">
+          <div class="cache-stat-val">${fmtTokens(d.totalCacheRead)}</div>
+          <div class="cache-stat-label">Cache Reads</div>
+        </div>
+        <div class="cache-stat">
+          <div class="cache-stat-val">${fmtTokens(d.totalCacheWrite)}</div>
+          <div class="cache-stat-label">Cache Writes</div>
+        </div>
+        <div class="cache-stat">
+          <div class="cache-stat-val">${d.totalInput > 0 ? ((d.totalCacheRead / d.totalInput) * 100).toFixed(0) : 0}%</div>
+          <div class="cache-stat-label">Hit Rate</div>
+        </div>
+        <div class="cache-stat">
+          <div class="cache-stat-val">~${fmtCost(d.cacheSavings)}</div>
+          <div class="cache-stat-label">Est. Savings</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Daily Breakdown -->
+  <div class="card table-card">
+    <div class="section-header">
+      <span class="section-title">Daily Breakdown</span>
+      <span class="section-badge">PEAK: ${fmtDate(d.peakDay.date)} at ${fmtCost(d.peakDay.totalCost)}</span>
+    </div>
+    <table class="daily-table">
+      <thead>
+        <tr>
+          <th>Day</th>
+          <th>Cost${isSubscription ? " (API)" : ""}</th>
+          <th>Tokens</th>
+          <th>Messages</th>
+          <th style="width:25%">Usage</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${dailyRows}
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  const tooltip = document.getElementById('chart-tooltip');
+  const tipTitle = document.getElementById('tip-title');
+  const tipRows = document.getElementById('tip-rows');
+
+  function showTooltip(el, e) {
+    const date = el.getAttribute('data-tip-date');
+    const cost = el.getAttribute('data-tip-cost');
+    const msgs = el.getAttribute('data-tip-msgs');
+    const tokens = el.getAttribute('data-tip-tokens');
+
+    if (!date) return;
+
+    tipTitle.textContent = date;
+    tipRows.innerHTML = '';
+
+    if (cost) addRow('Cost', cost);
+    if (msgs) addRow('Messages', msgs);
+    if (tokens) addRow('Tokens', tokens);
+
+    // Position
+    const rect = tooltip.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let x = e.clientX + 14;
+    let y = e.clientY - 10;
+    // Prevent overflow
+    if (x + 180 > vw) x = e.clientX - 180;
+    if (y + 100 > vh) y = e.clientY - 100;
+    if (y < 8) y = 8;
+
+    tooltip.style.left = x + 'px';
+    tooltip.style.top = y + 'px';
+    tooltip.classList.add('visible');
+  }
+
+  function addRow(label, value) {
+    const row = document.createElement('div');
+    row.className = 'tip-row';
+    row.innerHTML = '<span class="tip-label">' + label + '</span><span class="tip-value">' + value + '</span>';
+    tipRows.appendChild(row);
+  }
+
+  function hideTooltip() {
+    tooltip.classList.remove('visible');
+  }
+
+  // Bind to all chart elements with data-tip-* attributes
+  document.addEventListener('mousemove', function(e) {
+    const target = e.target.closest('[data-tip-date]');
+    if (target) {
+      showTooltip(target, e);
+    } else {
+      hideTooltip();
+    }
+  });
+
+  document.addEventListener('mouseleave', hideTooltip);
+})();
+</script>
+</body>
+</html>`;
+}
