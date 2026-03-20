@@ -14,6 +14,17 @@ export class DashboardPanel {
   private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+
+    // Handle messages from the webview (refresh button)
+    this.panel.webview.onDidReceiveMessage(
+      (msg) => {
+        if (msg.command === "refresh") {
+          vscode.commands.executeCommand("claudeUsageBar.showDashboard");
+        }
+      },
+      null,
+      this.disposables
+    );
   }
 
   static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo): DashboardPanel {
@@ -79,10 +90,15 @@ interface ComputedData {
   modelTotals: Record<string, { cost: number; messages: number; inputTokens: number; outputTokens: number }>;
   peakDay: DailyStats;
   cacheSavings: number;
+  // New aggregations
+  totalToolUsage: Record<string, number>;
+  totalHourlyActivity: number[];
+  totalSessions: number;
+  totalProjectBreakdown: Record<string, { cost: number; messages: number; tokens: number }>;
 }
 
 function emptyDay(date: string): DailyStats {
-  return { date, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, messageCount: 0, modelBreakdown: {} };
+  return { date, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, messageCount: 0, modelBreakdown: {}, toolUsage: {}, hourlyActivity: new Array(24).fill(0), sessionCount: 0, projectBreakdown: {} };
 }
 
 function compute(stats: DailyStats[]): ComputedData {
@@ -116,7 +132,31 @@ function compute(stats: DailyStats[]): ComputedData {
   const peakDay = stats.reduce((max, d) => d.totalCost > max.totalCost ? d : max, stats[0] ?? emptyDay(todayKey));
   const cacheSavings = totalCacheRead * 0.9 * 3 / 1_000_000;
 
-  return { today, yesterday, stats, totalCost, totalMessages, totalInput, totalOutput, totalCacheWrite, totalCacheRead, avgDailyCost, costChange, modelTotals, peakDay, cacheSavings };
+  // Aggregate new fields across all days
+  const totalToolUsage: Record<string, number> = {};
+  const totalHourlyActivity = new Array(24).fill(0);
+  let totalSessions = 0;
+  const totalProjectBreakdown: Record<string, { cost: number; messages: number; tokens: number }> = {};
+
+  for (const day of stats) {
+    for (const [tool, count] of Object.entries(day.toolUsage ?? {})) {
+      totalToolUsage[tool] = (totalToolUsage[tool] ?? 0) + count;
+    }
+    if (day.hourlyActivity) {
+      for (let h = 0; h < 24; h++) {
+        totalHourlyActivity[h] += day.hourlyActivity[h] ?? 0;
+      }
+    }
+    totalSessions += day.sessionCount ?? 0;
+    for (const [proj, data] of Object.entries(day.projectBreakdown ?? {})) {
+      if (!totalProjectBreakdown[proj]) totalProjectBreakdown[proj] = { cost: 0, messages: 0, tokens: 0 };
+      totalProjectBreakdown[proj].cost += data.cost;
+      totalProjectBreakdown[proj].messages += data.messages;
+      totalProjectBreakdown[proj].tokens += data.tokens;
+    }
+  }
+
+  return { today, yesterday, stats, totalCost, totalMessages, totalInput, totalOutput, totalCacheWrite, totalCacheRead, avgDailyCost, costChange, modelTotals, peakDay, cacheSavings, totalToolUsage, totalHourlyActivity, totalSessions, totalProjectBreakdown };
 }
 
 // ── Formatters ────────────────────────────────────────────────────────
@@ -367,6 +407,18 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
       <td class="cell-bar"><div class="mini-bar"><div class="mini-bar-fill" style="width:${d.peakDay.totalCost > 0 ? (day.totalCost / d.peakDay.totalCost * 100) : 0}%"></div></div></td>
     </tr>`;
   }).join("\n");
+
+  // Tool usage breakdown (sorted by frequency)
+  const sortedTools = Object.entries(d.totalToolUsage).sort((a, b) => b[1] - a[1]);
+  const totalToolCalls = sortedTools.reduce((s, [, c]) => s + c, 0);
+  const toolColors = ["#89b4fa", "#a6e3a1", "#fab387", "#f38ba8", "#f9e2af", "#cba6f7", "#94e2d5", "#b4befe", "#74c7ec", "#f2cdcd"];
+
+  // Project leaderboard (sorted by cost)
+  const sortedProjects = Object.entries(d.totalProjectBreakdown).sort((a, b) => b[1].cost - a[1].cost);
+  const maxProjectCost = sortedProjects.length > 0 ? sortedProjects[0][1].cost : 1;
+
+  // Hourly heatmap data
+  const maxHourly = Math.max(...d.totalHourlyActivity, 1);
 
   // Subscription info
   const subInfo = formatSubscription(sub);
@@ -947,6 +999,131 @@ body::before {
 .secondary-row .card:nth-child(1) { animation-delay: 0.35s; }
 .secondary-row .card:nth-child(2) { animation-delay: 0.4s; }
 .table-card { animation-delay: 0.45s; }
+
+/* ── Tool usage bars ── */
+.tool-list { display: flex; flex-direction: column; gap: 4px; }
+.tool-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 48px 40px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 4px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.tool-row:hover { background: rgba(255,255,255,0.03); }
+.tool-name { font-size: 0.78rem; font-weight: 500; color: var(--text-primary); }
+.tool-bar-bg {
+  height: 6px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tool-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.tool-count { font-size: 0.75rem; font-weight: 600; color: var(--text-primary); text-align: right; }
+.tool-pct { font-size: 0.7rem; color: var(--text-secondary); text-align: right; }
+
+/* ── Hourly heatmap ── */
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 3px;
+}
+.heatmap-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  min-height: 18px;
+  transition: opacity 0.2s;
+  position: relative;
+}
+.heatmap-cell:hover { opacity: 0.8; }
+.heatmap-labels {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 3px;
+  margin-top: 4px;
+}
+.heatmap-label {
+  font-size: 0.55rem;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* ── Project leaderboard ── */
+.project-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto 80px;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.project-row:last-child { border-bottom: none; }
+.project-row:hover { background: rgba(255,255,255,0.02); }
+.project-name {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-cost { font-size: 0.78rem; font-weight: 600; color: var(--accent-green); text-align: right; }
+.project-msgs { font-size: 0.72rem; color: var(--text-secondary); text-align: right; }
+.project-bar {
+  height: 5px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.project-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+}
+
+/* ── Refresh button ── */
+.refresh-bar {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 18px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.refresh-btn:hover {
+  background: rgba(137,180,250,0.1);
+  border-color: rgba(137,180,250,0.3);
+}
+.refresh-btn svg { transition: transform 0.3s; }
+.refresh-btn:hover svg { transform: rotate(90deg); }
+
+/* ── New sections layout ── */
+.triple-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+@media (max-width: 800px) {
+  .triple-row { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -1152,6 +1329,64 @@ body::before {
     </div>
   </div>
 
+  <!-- Tool Usage + Hourly Heatmap + Project Leaderboard -->
+  <div class="triple-row">
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Tool Usage</span>
+        <span class="section-badge">${totalToolCalls} calls</span>
+      </div>
+      <div class="tool-list">
+        ${sortedTools.slice(0, 10).map(([name, count], i) => {
+          const pct = totalToolCalls > 0 ? (count / totalToolCalls) * 100 : 0;
+          const color = toolColors[i % toolColors.length];
+          return `<div class="tool-row">
+            <span class="tool-name">${name}</span>
+            <div class="tool-bar-bg"><div class="tool-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+            <span class="tool-count">${count}</span>
+            <span class="tool-pct">${pct.toFixed(0)}%</span>
+          </div>`;
+        }).join("\n")}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Activity by Hour</span>
+        <span class="section-badge">${d.totalSessions} sessions</span>
+      </div>
+      <div class="heatmap-grid">
+        ${d.totalHourlyActivity.map((count, h) => {
+          const intensity = maxHourly > 0 ? count / maxHourly : 0;
+          const bg = count === 0
+            ? "rgba(255,255,255,0.03)"
+            : `rgba(137,180,250,${0.15 + intensity * 0.75})`;
+          return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${h}:00–${h}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
+        }).join("\n")}
+      </div>
+      <div class="heatmap-labels">
+        ${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-label">${h % 3 === 0 ? h : ""}</span>`).join("")}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Projects</span>
+        <span class="section-badge">${sortedProjects.length} active</span>
+      </div>
+      ${sortedProjects.slice(0, 8).map(([name, data]) => {
+        const shortName = name.split("/").pop() ?? name;
+        const barPct = maxProjectCost > 0 ? (data.cost / maxProjectCost) * 100 : 0;
+        return `<div class="project-row">
+          <span class="project-name" title="${name}">${shortName}</span>
+          <span class="project-cost">${fmtCost(data.cost)}</span>
+          <span class="project-msgs">${data.messages} msgs</span>
+          <div class="project-bar"><div class="project-bar-fill" style="width:${barPct}%"></div></div>
+        </div>`;
+      }).join("\n")}
+    </div>
+  </div>
+
   <!-- Daily Breakdown -->
   <div class="card table-card">
     <div class="section-header">
@@ -1172,6 +1407,14 @@ body::before {
         ${dailyRows}
       </tbody>
     </table>
+  </div>
+
+  <!-- Refresh button -->
+  <div class="refresh-bar">
+    <button class="refresh-btn" onclick="(acquireVsCodeApi()).postMessage({command:'refresh'})">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z" fill="currentColor"/></svg>
+      Refresh Dashboard
+    </button>
   </div>
 
 </div>
