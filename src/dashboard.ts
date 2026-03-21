@@ -361,7 +361,7 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
   const msgSparkValues = chartDays.map(s => s.messageCount);
-  const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens);
+  const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens + s.cacheWriteTokens + s.cacheReadTokens);
 
   const changeIcon = d.costChange > 0 ? "&#9650;" : d.costChange < 0 ? "&#9660;" : "&#8226;";
   const changeColor = d.costChange > 0 ? "#f38ba8" : d.costChange < 0 ? "#a6e3a1" : "rgba(255,255,255,0.4)";
@@ -383,8 +383,9 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
   }).join("\n");
 
   // Today's token data for ring gauges
-  const todayTotalTokens = d.today.inputTokens + d.today.outputTokens;
+  const todayIOTokens = d.today.inputTokens + d.today.outputTokens;
   const todayCacheTotal = d.today.cacheWriteTokens + d.today.cacheReadTokens;
+  const todayAllTokens = todayIOTokens + todayCacheTotal;
   const sortedModels = Object.entries(d.modelTotals).sort((a, b) => b[1].cost - a[1].cost);
   const modelLegend = sortedModels.map(([name, data], i) => {
     const color = modelColors[i % modelColors.length];
@@ -1319,29 +1320,29 @@ body::before {
     <div class="card kpi-card kpi-tokens">
       <div class="kpi-header">
         <div class="kpi-header-left">
-          <div class="kpi-label">Tokens Today</div>
-          <div class="kpi-value">${fmtTokens(todayTotalTokens)}</div>
-          <div class="kpi-sub">across ${d.today.messageCount} messages</div>
+          <div class="kpi-label">Tokens Today (All)</div>
+          <div class="kpi-value">${fmtTokens(todayAllTokens)}</div>
+          <div class="kpi-sub">${fmtTokens(todayIOTokens)} I/O &middot; ${fmtTokens(todayCacheTotal)} cache &middot; ${d.today.messageCount} msgs</div>
         </div>
         <div class="kpi-sparkline">${buildSparkline(tokenSparkValues, 80, 36, "rgba(250,179,135,0.6)")}</div>
       </div>
       <div class="token-gauges">
         <div class="token-gauge">
-          ${buildRingGauge(d.today.inputTokens, todayTotalTokens, 48, "#89b4fa")}
+          ${buildRingGauge(d.today.inputTokens, todayAllTokens, 48, "#89b4fa")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Input</div>
             <div class="token-gauge-val">${fmtTokens(d.today.inputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(d.today.outputTokens, todayTotalTokens, 48, "#a6e3a1")}
+          ${buildRingGauge(d.today.outputTokens, todayAllTokens, 48, "#a6e3a1")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Output</div>
             <div class="token-gauge-val">${fmtTokens(d.today.outputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(d.today.cacheReadTokens, d.today.cacheReadTokens + d.today.cacheWriteTokens || 1, 48, "#94e2d5")}
+          ${buildRingGauge(todayCacheTotal, todayAllTokens, 48, "#94e2d5")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Cache</div>
             <div class="token-gauge-val">${fmtTokens(todayCacheTotal)}</div>
@@ -1369,7 +1370,7 @@ body::before {
         <div class="kpi-header-left">
           <div class="kpi-label">Messages This Week</div>
           <div class="kpi-value">${d.totalMessages}</div>
-          <div class="kpi-sub">${d.today.messageCount} today &middot; ${fmtTokens(d.totalInput + d.totalOutput)} tokens total</div>
+          <div class="kpi-sub">${d.today.messageCount} today &middot; ${fmtTokens(d.totalInput + d.totalOutput + d.totalCacheWrite + d.totalCacheRead)} tokens total</div>
         </div>
         <div class="kpi-sparkline">${buildSparkline(msgSparkValues, 80, 36, "rgba(203,166,247,0.6)")}</div>
       </div>
@@ -1405,7 +1406,7 @@ body::before {
     <div class="card">
       <div class="section-header">
         <span class="section-title">Token Usage</span>
-        <span class="section-badge">${fmtTokens(d.totalInput + d.totalOutput)} TOTAL</span>
+        <span class="section-badge">${fmtTokens(d.totalInput + d.totalOutput + d.totalCacheWrite + d.totalCacheRead)} TOTAL</span>
       </div>
       <div class="chart-container">
         ${buildTokenStackedBars(chartDays, 480, 150)}
@@ -1435,7 +1436,7 @@ body::before {
           <div class="cache-stat-label">Cache Writes</div>
         </div>
         <div class="cache-stat">
-          <div class="cache-stat-val">${d.totalInput > 0 ? ((d.totalCacheRead / d.totalInput) * 100).toFixed(0) : 0}%</div>
+          <div class="cache-stat-val">${(d.totalCacheRead + d.totalInput) > 0 ? ((d.totalCacheRead / (d.totalCacheRead + d.totalInput)) * 100).toFixed(0) : 0}%</div>
           <div class="cache-stat-label">Hit Rate</div>
         </div>
         <div class="cache-stat">
