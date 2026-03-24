@@ -194,9 +194,17 @@ function fmtDateShort(d: string): string {
 }
 
 // ── Catmull-Rom to cubic bezier smooth path (server-side) ─────────────
-function smoothPathTS(pts: { x: number; y: number }[]): string {
+function smoothPathTS(pts: { x: number; y: number }[], minY?: number, maxY?: number): string {
   if (pts.length < 2) return "";
   if (pts.length === 2) return `M${pts[0].x},${pts[0].y} L${pts[1].x},${pts[1].y}`;
+  const clamp = (y: number, segMinY: number, segMaxY: number) => {
+    let v = y;
+    if (minY !== undefined && v < minY) v = minY;
+    if (maxY !== undefined && v > maxY) v = maxY;
+    // Also clamp to segment endpoint range to prevent overshoot
+    v = Math.max(Math.min(segMinY, segMaxY), Math.min(Math.max(segMinY, segMaxY), v));
+    return v;
+  };
   let d = `M${pts[0].x},${pts[0].y}`;
   for (let i = 0; i < pts.length - 1; i++) {
     const p0 = pts[i === 0 ? 0 : i - 1];
@@ -204,16 +212,16 @@ function smoothPathTS(pts: { x: number; y: number }[]): string {
     const p2 = pts[i + 1];
     const p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1];
     const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp1y = clamp(p1.y + (p2.y - p0.y) / 6, p1.y, p2.y);
     const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    const cp2y = clamp(p2.y - (p3.y - p1.y) / 6, p1.y, p2.y);
     d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
   }
   return d;
 }
-function smoothAreaTS(pts: { x: number; y: number }[], baseY: number): string {
+function smoothAreaTS(pts: { x: number; y: number }[], baseY: number, minY?: number): string {
   if (pts.length < 2) return "";
-  return smoothPathTS(pts) + ` L${pts[pts.length - 1].x},${baseY} L${pts[0].x},${baseY} Z`;
+  return smoothPathTS(pts, minY, baseY) + ` L${pts[pts.length - 1].x},${baseY} L${pts[0].x},${baseY} Z`;
 }
 
 // ── SVG Charts (with data attributes for JS tooltips) ─────────────────
@@ -235,8 +243,8 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
     date: d.date,
   }));
 
-  const linePath = smoothPathTS(points);
-  const areaPath = smoothAreaTS(points, pad.top + h);
+  const linePath = smoothPathTS(points, pad.top, pad.top + h);
+  const areaPath = smoothAreaTS(points, pad.top + h, pad.top);
 
   const gridLines = [0, 0.25, 0.5, 0.75, 1].map(pct => {
     const y = pad.top + h - pct * h;
@@ -255,11 +263,10 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
   ).join("\n");
 
   // Embed point data as a JSON array for the JS proximity engine
-  const pointData = JSON.stringify(points.map(p => ({
-    x: +p.x.toFixed(1), y: +p.y.toFixed(1),
-    date: fmtDate(p.date), cost: fmtCost(p.cost),
-    msgs: p.msgs + " messages", tokens: fmtTokens(p.tokens) + " tokens"
-  })));
+  const pointData = JSON.stringify(sorted.map((d, i) => {
+    const models = Object.entries(d.modelBreakdown || {}).sort((a, b) => b[1].cost - a[1].cost).map(([m, data]) => ({ n: fmtModel(m), c: fmtCost(data.cost), m: data.messages }));
+    return { x: +points[i].x.toFixed(1), y: +points[i].y.toFixed(1), date: fmtDate(d.date), cost: fmtCost(d.totalCost), msgs: d.messageCount + " messages", tokens: fmtTokens(d.inputTokens + d.outputTokens) + " tokens", models };
+  }));
 
   return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points='${pointData}' data-pad-left="${pad.left}" data-pad-top="${pad.top}" data-chart-h="${h}">
     <defs>
@@ -338,10 +345,10 @@ function buildTokenAreaChart(days: DailyStats[], width: number, height: number):
     val: d.outputTokens, date: d.date,
   }));
 
-  const inputLinePath = smoothPathTS(inputPts);
-  const outputLinePath = smoothPathTS(outputPts);
-  const inputAreaPathD = smoothAreaTS(inputPts, pad.top + h);
-  const outputAreaPathD = smoothAreaTS(outputPts, pad.top + h);
+  const inputLinePath = smoothPathTS(inputPts, pad.top, pad.top + h);
+  const outputLinePath = smoothPathTS(outputPts, pad.top, pad.top + h);
+  const inputAreaPathD = smoothAreaTS(inputPts, pad.top + h, pad.top);
+  const outputAreaPathD = smoothAreaTS(outputPts, pad.top + h, pad.top);
 
   const gridLines = [0, 0.25, 0.5, 0.75, 1].map(pct => {
     const y = pad.top + h - pct * h;
@@ -355,12 +362,10 @@ function buildTokenAreaChart(days: DailyStats[], width: number, height: number):
     .join("\n");
 
   // Data points for tooltips
-  const pointData = JSON.stringify(sorted.map((d, i) => ({
-    x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1),
-    date: fmtDate(d.date), cost: "Input: " + fmtTokens(d.inputTokens),
-    msgs: "Output: " + fmtTokens(d.outputTokens),
-    tokens: "Total: " + fmtTokens(d.inputTokens + d.outputTokens)
-  })));
+  const pointData = JSON.stringify(sorted.map((d, i) => {
+    const models = Object.entries(d.modelBreakdown || {}).sort((a, b) => (b[1].inputTokens + b[1].outputTokens) - (a[1].inputTokens + a[1].outputTokens)).map(([m, mb]) => ({ n: fmtModel(m), c: fmtTokens(mb.inputTokens + mb.outputTokens), m: mb.messages }));
+    return { x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1), date: fmtDate(d.date), cost: "Input: " + fmtTokens(d.inputTokens), msgs: "Output: " + fmtTokens(d.outputTokens), tokens: "Total: " + fmtTokens(d.inputTokens + d.outputTokens), models };
+  }));
 
   const inputDots = inputPts.map((p, i) =>
     `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="${i}" opacity="0.4"/>`
@@ -459,17 +464,6 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
       <span class="legend-val">${fmtCost(data.cost)}</span>
       <span class="legend-pct">${pct}%</span>
     </div>`;
-  }).join("\n");
-
-  const dailyRows = d.stats.map(day => {
-    const isToday = day.date === d.today.date;
-    return `<tr class="${isToday ? "row-today" : ""}">
-      <td class="cell-date">${fmtDate(day.date)}${isToday ? '<span class="badge-today">TODAY</span>' : ""}</td>
-      <td class="cell-cost">${fmtCost(day.totalCost)}</td>
-      <td class="cell-tokens">${fmtTokens(day.inputTokens + day.outputTokens)}</td>
-      <td class="cell-msgs">${day.messageCount}</td>
-      <td class="cell-bar"><div class="mini-bar"><div class="mini-bar-fill" style="width:${d.peakDay.totalCost > 0 ? (day.totalCost / d.peakDay.totalCost * 100) : 0}%"></div></div></td>
-    </tr>`;
   }).join("\n");
 
   // Tool usage breakdown (sorted by frequency)
@@ -926,95 +920,6 @@ body::before {
   letter-spacing: 0.05em;
 }
 
-/* ── Daily breakdown table (collapsible) ── */
-.table-card { padding: 18px; }
-.collapse-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 0.72rem;
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
-  transition: all 0.15s;
-}
-.collapse-toggle:hover {
-  color: var(--text-primary);
-  background: rgba(255,255,255,0.04);
-}
-.collapse-toggle svg {
-  transition: transform 0.25s ease;
-}
-.collapse-toggle.expanded svg {
-  transform: rotate(180deg);
-}
-.collapsible-body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.35s ease;
-}
-.collapsible-body.expanded {
-  max-height: 2000px;
-}
-.daily-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.daily-table th {
-  text-align: left;
-  padding: 8px 12px;
-  font-size: 0.65rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border);
-}
-.daily-table td {
-  padding: 10px 12px;
-  font-size: 0.82rem;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.daily-table tr:hover td { background: rgba(255,255,255,0.02); }
-.row-today td { background: rgba(137,180,250,0.04) !important; }
-.cell-date {
-  font-weight: 600;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.badge-today {
-  font-size: 0.55rem;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 3px;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-  color: #fff;
-  letter-spacing: 0.04em;
-}
-.cell-cost { font-weight: 600; color: var(--accent-green); }
-.cell-tokens { color: var(--accent-peach); }
-.cell-msgs { color: var(--text-secondary); }
-.mini-bar {
-  width: 100%;
-  height: 6px;
-  background: rgba(255,255,255,0.04);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.mini-bar-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
-  transition: width 0.3s;
-}
-
 /* ── Custom Tooltip ── */
 #chart-tooltip {
   position: fixed;
@@ -1048,6 +953,9 @@ body::before {
 }
 .tip-label { color: var(--text-secondary); }
 .tip-value { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+.tip-value-cost { color: var(--accent-green); font-weight: 600; white-space: nowrap; }
+.tip-value-tokens { color: var(--accent-peach); font-weight: 600; white-space: nowrap; }
+.tip-value-msgs { color: var(--text-secondary); font-weight: 600; white-space: nowrap; }
 
 /* ── SVG animations ── */
 @keyframes lineDrawIn {
@@ -1261,7 +1169,7 @@ body::before {
 .charts-row .card:nth-child(2) { animation-delay: 0.25s; }
 .secondary-row .card:nth-child(1) { animation-delay: 0.3s; }
 .secondary-row .card:nth-child(2) { animation-delay: 0.35s; }
-.table-card { animation-delay: 0.4s; }
+
 
 /* ── Donation top strip ── */
 .donate-strip {
@@ -1389,8 +1297,8 @@ body::before {
   gap: 2px;
 }
 .heatmap-cell {
-  border-radius: 3px;
-  height: 28px;
+  border-radius: 4px;
+  height: 48px;
   transition: opacity 0.2s, transform 0.15s;
   position: relative;
   cursor: default;
@@ -1449,7 +1357,7 @@ body::before {
   text-overflow: ellipsis;
 }
 .project-bar-inline {
-  height: 3px;
+  height: 5px;
   margin-top: 4px;
   background: rgba(255,255,255,0.04);
   border-radius: 2px;
@@ -1589,25 +1497,25 @@ body::before {
       </div>
       <div class="token-gauges">
         <div class="token-gauge">
-          ${buildRingGauge(d.today.inputTokens, todayAllTokens, 48, "#89b4fa")}
+          ${buildRingGauge(d.today.inputTokens, todayIOTokens, 48, "#89b4fa")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Input</div>
             <div class="token-gauge-val">${fmtTokens(d.today.inputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(d.today.outputTokens, todayAllTokens, 48, "#a6e3a1")}
+          ${buildRingGauge(d.today.outputTokens, todayIOTokens, 48, "#a6e3a1")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Output</div>
             <div class="token-gauge-val">${fmtTokens(d.today.outputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(todayCacheTotal, todayAllTokens, 48, "#94e2d5")}
+          ${buildRingGauge(d.today.cacheReadTokens, todayCacheTotal, 48, "#94e2d5")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Cache</div>
             <div class="token-gauge-val">${fmtTokens(todayCacheTotal)}</div>
-            <div class="token-gauge-sub">${fmtTokens(d.today.cacheReadTokens)} read</div>
+            <div class="token-gauge-sub">${fmtTokens(d.today.cacheWriteTokens)} write</div>
           </div>
         </div>
       </div>
@@ -1688,18 +1596,38 @@ body::before {
     </div>
   </div>
 
-  <!-- Tool Usage + Activity Heatmap -->
+  <!-- Projects + Tool Usage -->
   <div class="insights-row">
     <div class="card">
       <div class="section-header">
-        <span class="section-title">Tool Usage</span>
-        <span class="section-badge">${totalToolCalls} calls</span>
+        <span class="section-title">Projects</span>
+        <span class="section-badge" id="projects-badge">${sortedProjects.length} active</span>
       </div>
-      <div class="tool-list">
-        ${sortedTools.slice(0, 10).map(([name, count], i) => {
+      <div class="project-list" id="project-list">
+        ${sortedProjects.slice(0, 10).map(([name, data]) => {
+          const shortName = name.split("/").pop() ?? name;
+          const barPct = maxProjectCost > 0 ? (data.cost / maxProjectCost) * 100 : 0;
+          return `<div class="project-row">
+            <div class="project-info">
+              <div class="project-name" title="${name}">${shortName}</div>
+              <div class="project-bar-inline"><div class="project-bar-fill" style="width:${barPct}%"></div></div>
+            </div>
+            <span class="project-cost">${fmtCost(data.cost)}</span>
+            <span class="project-msgs">${data.messages} msgs</span>
+          </div>`;
+        }).join("\n")}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-header">
+        <span class="section-title">Tool Usage</span>
+        <span class="section-badge" id="tool-badge">${totalToolCalls} calls</span>
+      </div>
+      <div class="tool-list" id="tool-list">
+        ${sortedTools.slice(0, 15).map(([name, count], i) => {
           const pct = totalToolCalls > 0 ? (count / totalToolCalls) * 100 : 0;
           const color = toolColors[i % toolColors.length];
-          // Shorten MCP plugin names: "mcp__plugin_playwright_playwright__browser_click" → "browser_click"
           const shortName = name.includes("__") ? name.split("__").pop()! : name;
           return `<div class="tool-row">
             <span class="tool-name" title="${name}">${shortName}</span>
@@ -1710,89 +1638,38 @@ body::before {
         }).join("\n")}
       </div>
     </div>
-
-    <div class="card">
-      <div class="section-header">
-        <span class="section-title">Activity by Hour</span>
-        <span class="section-badge">${d.totalSessions} sessions</span>
-      </div>
-      <div class="heatmap-wrap">
-        <div class="heatmap-grid">
-          ${d.totalHourlyActivity.map((count, h) => {
-            const intensity = maxHourly > 0 ? count / maxHourly : 0;
-            const bg = count === 0
-              ? "rgba(255,255,255,0.03)"
-              : `rgba(137,180,250,${0.15 + intensity * 0.85})`;
-            return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${String(h).padStart(2, "0")}:00 – ${String(h).padStart(2, "0")}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
-          }).join("\n")}
-        </div>
-        <div class="heatmap-labels">
-          ${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-label">${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`).join("")}
-        </div>
-        <div class="heatmap-footer">
-          <span>Less</span>
-          <div class="heatmap-legend">
-            <div class="heatmap-legend-cell" style="background:rgba(255,255,255,0.03)"></div>
-            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.25)"></div>
-            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.5)"></div>
-            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.75)"></div>
-            <div class="heatmap-legend-cell" style="background:rgba(137,180,250,1)"></div>
-          </div>
-          <span>More</span>
-        </div>
-      </div>
-    </div>
   </div>
 
-  <!-- Project Leaderboard (full width) -->
+  <!-- Activity by Hour (full width) -->
   <div class="card" style="margin-bottom:14px">
     <div class="section-header">
-      <span class="section-title">Projects</span>
-      <span class="section-badge">${sortedProjects.length} active</span>
+      <span class="section-title">Activity by Hour</span>
+      <span class="section-badge" id="sessions-badge">${d.totalSessions} sessions</span>
     </div>
-    <div class="project-list">
-      ${sortedProjects.slice(0, 10).map(([name, data]) => {
-        const shortName = name.split("/").pop() ?? name;
-        const barPct = maxProjectCost > 0 ? (data.cost / maxProjectCost) * 100 : 0;
-        return `<div class="project-row">
-          <div class="project-info">
-            <div class="project-name" title="${name}">${shortName}</div>
-            <div class="project-bar-inline"><div class="project-bar-fill" style="width:${barPct}%"></div></div>
-          </div>
-          <span class="project-cost">${fmtCost(data.cost)}</span>
-          <span class="project-msgs">${data.messages} msgs</span>
-        </div>`;
-      }).join("\n")}
-    </div>
-  </div>
-
-  <!-- Daily Breakdown (collapsible) -->
-  <div class="card table-card">
-    <div class="section-header">
-      <span class="section-title">Daily Breakdown</span>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span class="section-badge" id="daily-peak-badge">PEAK: ${fmtDate(d.peakDay.date)} at ${fmtCost(d.peakDay.totalCost)}</span>
-        <button class="collapse-toggle" id="daily-toggle" aria-expanded="false" aria-controls="daily-body">
-          Show
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
+    <div class="heatmap-wrap">
+      <div class="heatmap-grid" id="heatmap-grid">
+        ${d.totalHourlyActivity.map((count, h) => {
+          const intensity = maxHourly > 0 ? count / maxHourly : 0;
+          const bg = count === 0
+            ? "rgba(255,255,255,0.03)"
+            : `rgba(137,180,250,${0.15 + intensity * 0.85})`;
+          return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${String(h).padStart(2, "0")}:00 – ${String(h).padStart(2, "0")}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
+        }).join("\n")}
       </div>
-    </div>
-    <div class="collapsible-body" id="daily-body">
-      <table class="daily-table">
-        <thead>
-          <tr>
-            <th>Day</th>
-            <th>Cost${isSubscription ? " (API)" : ""}</th>
-            <th>Tokens</th>
-            <th>Messages</th>
-            <th style="width:25%">Usage</th>
-          </tr>
-        </thead>
-        <tbody id="daily-tbody">
-          ${dailyRows}
-        </tbody>
-      </table>
+      <div class="heatmap-labels">
+        ${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-label">${h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>`).join("")}
+      </div>
+      <div class="heatmap-footer">
+        <span>Less</span>
+        <div class="heatmap-legend">
+          <div class="heatmap-legend-cell" style="background:rgba(255,255,255,0.03)"></div>
+          <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.25)"></div>
+          <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.5)"></div>
+          <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.75)"></div>
+          <div class="heatmap-legend-cell" style="background:rgba(137,180,250,1)"></div>
+        </div>
+        <span>More</span>
+      </div>
     </div>
   </div>
 
@@ -1834,18 +1711,27 @@ body::before {
   const tipTitle = document.getElementById('tip-title');
   const tipRows = document.getElementById('tip-rows');
 
-  function addRow(label, value) {
-    const row = document.createElement('div');
+  function addRow(label, value, cls) {
+    var valClass = cls || 'tip-value';
+    var row = document.createElement('div');
     row.className = 'tip-row';
-    row.innerHTML = '<span class="tip-label">' + label + '</span><span class="tip-value">' + value + '</span>';
+    row.innerHTML = '<span class="tip-label">' + label + '</span><span class="' + valClass + '">' + value + '</span>';
     tipRows.appendChild(row);
   }
 
   // ── Catmull-Rom to cubic bezier smooth path ──
-  function smoothPath(pts) {
-    // pts: array of {x, y}
+  function smoothPath(pts, minY, maxY) {
+    // pts: array of {x, y}, minY/maxY clamp control points to chart bounds
     if (pts.length < 2) return '';
     if (pts.length === 2) return 'M' + pts[0].x + ',' + pts[0].y + ' L' + pts[1].x + ',' + pts[1].y;
+    function clamp(y, segMinY, segMaxY) {
+      var v = y;
+      if (minY !== undefined && v < minY) v = minY;
+      if (maxY !== undefined && v > maxY) v = maxY;
+      // Clamp to segment endpoint range to prevent overshoot
+      v = Math.max(Math.min(segMinY, segMaxY), Math.min(Math.max(segMinY, segMaxY), v));
+      return v;
+    }
     var d = 'M' + pts[0].x + ',' + pts[0].y;
     for (var i = 0; i < pts.length - 1; i++) {
       var p0 = pts[i === 0 ? 0 : i - 1];
@@ -1853,16 +1739,16 @@ body::before {
       var p2 = pts[i + 1];
       var p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1];
       var cp1x = p1.x + (p2.x - p0.x) / 6;
-      var cp1y = p1.y + (p2.y - p0.y) / 6;
+      var cp1y = clamp(p1.y + (p2.y - p0.y) / 6, p1.y, p2.y);
       var cp2x = p2.x - (p3.x - p1.x) / 6;
-      var cp2y = p2.y - (p3.y - p1.y) / 6;
+      var cp2y = clamp(p2.y - (p3.y - p1.y) / 6, p1.y, p2.y);
       d += ' C' + cp1x.toFixed(1) + ',' + cp1y.toFixed(1) + ' ' + cp2x.toFixed(1) + ',' + cp2y.toFixed(1) + ' ' + p2.x.toFixed(1) + ',' + p2.y.toFixed(1);
     }
     return d;
   }
-  function smoothArea(pts, baseY) {
+  function smoothArea(pts, baseY, minY) {
     if (pts.length < 2) return '';
-    var pathD = smoothPath(pts);
+    var pathD = smoothPath(pts, minY, baseY);
     return pathD + ' L' + pts[pts.length - 1].x + ',' + baseY + ' L' + pts[0].x + ',' + baseY + ' Z';
   }
 
@@ -1922,11 +1808,36 @@ body::before {
     var avgDailyCost = totalCost / daysWithData;
     var peakDay = stats.reduce(function(max, d) { return d.totalCost > max.totalCost ? d : max; }, stats[0] || { date: todayKey, totalCost: 0 });
     var cacheSavings = totalCacheRead * 0.9 * 3 / 1000000;
+
+    // Aggregate tool usage, hourly activity, sessions, projects
+    var toolUsage = {};
+    var hourlyActivity = new Array(24).fill(0);
+    var totalSessions = 0;
+    var projectBreakdown = {};
+    stats.forEach(function(s) {
+      Object.keys(s.toolUsage || {}).forEach(function(t) {
+        toolUsage[t] = (toolUsage[t] || 0) + s.toolUsage[t];
+      });
+      if (s.hourlyActivity) {
+        for (var h = 0; h < 24; h++) {
+          hourlyActivity[h] += s.hourlyActivity[h] || 0;
+        }
+      }
+      totalSessions += s.sessionCount || 0;
+      Object.keys(s.projectBreakdown || {}).forEach(function(p) {
+        if (!projectBreakdown[p]) projectBreakdown[p] = { cost: 0, messages: 0, tokens: 0 };
+        projectBreakdown[p].cost += s.projectBreakdown[p].cost;
+        projectBreakdown[p].messages += s.projectBreakdown[p].messages;
+        projectBreakdown[p].tokens += s.projectBreakdown[p].tokens;
+      });
+    });
+
     return {
       totalCost: totalCost, totalMsgs: totalMsgs, totalInput: totalInput, totalOutput: totalOutput,
       totalCacheWrite: totalCacheWrite, totalCacheRead: totalCacheRead,
       avgDailyCost: avgDailyCost, peakDay: peakDay, modelTotals: modelTotals, cacheSavings: cacheSavings,
-      daysWithData: daysWithData
+      daysWithData: daysWithData, toolUsage: toolUsage, hourlyActivity: hourlyActivity,
+      totalSessions: totalSessions, projectBreakdown: projectBreakdown
     };
   }
 
@@ -1947,8 +1858,8 @@ body::before {
       };
     });
 
-    var linePath = smoothPath(points);
-    var areaPath = smoothArea(points, pad.top + h);
+    var linePath = smoothPath(points, pad.top, pad.top + h);
+    var areaPath = smoothArea(points, pad.top + h, pad.top);
 
     var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
       var y = pad.top + h - pct * h;
@@ -1965,8 +1876,12 @@ body::before {
       return '<circle cx="' + p.x + '" cy="' + p.y + '" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="' + i + '" opacity="0.4"/>';
     }).join('');
 
-    var pointData = JSON.stringify(points.map(function(p) {
-      return { x: +p.x.toFixed(1), y: +p.y.toFixed(1), date: fmtDate(p.date), cost: fmtCost(p.cost), msgs: p.msgs + ' messages', tokens: fmtTokens(p.tokens) + ' tokens' };
+    var pointData = JSON.stringify(sorted.map(function(d, i) {
+      var models = [];
+      Object.keys(d.modelBreakdown || {}).sort(function(a, b) { return d.modelBreakdown[b].cost - d.modelBreakdown[a].cost; }).forEach(function(m) {
+        models.push({ n: fmtModel(m), c: fmtCost(d.modelBreakdown[m].cost), m: d.modelBreakdown[m].messages });
+      });
+      return { x: +points[i].x.toFixed(1), y: +points[i].y.toFixed(1), date: fmtDate(d.date), cost: fmtCost(d.totalCost), msgs: d.messageCount + ' messages', tokens: fmtTokens(d.inputTokens + d.outputTokens) + ' tokens', models: models };
     }));
 
     return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points="' + pointData.replace(/"/g, '&quot;') + '" data-pad-left="' + pad.left + '" data-pad-top="' + pad.top + '" data-chart-h="' + h + '">' +
@@ -1998,10 +1913,10 @@ body::before {
       return { x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w, y: pad.top + h - (d.outputTokens / maxTokens) * h, val: d.outputTokens, date: d.date };
     });
 
-    var inputLinePath = smoothPath(inputPts);
-    var outputLinePath = smoothPath(outputPts);
-    var inputAreaPath = smoothArea(inputPts, pad.top + h);
-    var outputAreaPath = smoothArea(outputPts, pad.top + h);
+    var inputLinePath = smoothPath(inputPts, pad.top, pad.top + h);
+    var outputLinePath = smoothPath(outputPts, pad.top, pad.top + h);
+    var inputAreaPath = smoothArea(inputPts, pad.top + h, pad.top);
+    var outputAreaPath = smoothArea(outputPts, pad.top + h, pad.top);
 
     var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
       var y = pad.top + h - pct * h;
@@ -2014,7 +1929,12 @@ body::before {
       .map(function(p) { return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + fmtDateShort(p.date) + '</text>'; }).join('');
 
     var pointData = JSON.stringify(sorted.map(function(d, i) {
-      return { x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1), date: fmtDate(d.date), cost: 'Input: ' + fmtTokens(d.inputTokens), msgs: 'Output: ' + fmtTokens(d.outputTokens), tokens: 'Total: ' + fmtTokens(d.inputTokens + d.outputTokens) };
+      var models = [];
+      Object.keys(d.modelBreakdown || {}).sort(function(a, b) { return (d.modelBreakdown[b].inputTokens + d.modelBreakdown[b].outputTokens) - (d.modelBreakdown[a].inputTokens + d.modelBreakdown[a].outputTokens); }).forEach(function(m) {
+        var mb = d.modelBreakdown[m];
+        models.push({ n: fmtModel(m), c: fmtTokens(mb.inputTokens + mb.outputTokens), m: mb.messages });
+      });
+      return { x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1), date: fmtDate(d.date), cost: 'Input: ' + fmtTokens(d.inputTokens), msgs: 'Output: ' + fmtTokens(d.outputTokens), tokens: 'Total: ' + fmtTokens(d.inputTokens + d.outputTokens), models: models };
     }));
 
     var inputDots = inputPts.map(function(p, i) {
@@ -2098,10 +2018,10 @@ body::before {
       var outputPts = hourlyData.map(function(d, i) {
         return { x: pad.left + (i / 23) * w, y: pad.top + h - (d.output / maxVal) * h };
       });
-      var inputLinePath = smoothPath(inputPts);
-      var outputLinePath = smoothPath(outputPts);
-      var inputAreaPath = smoothArea(inputPts, pad.top + h);
-      var outputAreaPath = smoothArea(outputPts, pad.top + h);
+      var inputLinePath = smoothPath(inputPts, pad.top, pad.top + h);
+      var outputLinePath = smoothPath(outputPts, pad.top, pad.top + h);
+      var inputAreaPath = smoothArea(inputPts, pad.top + h, pad.top);
+      var outputAreaPath = smoothArea(outputPts, pad.top + h, pad.top);
 
       var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
         var y = pad.top + h - pct * h;
@@ -2139,8 +2059,8 @@ body::before {
       var pts = hourlyData.map(function(d, i) {
         return { x: pad.left + (i / 23) * w, y: pad.top + h - (d.cost / maxCost) * h, cost: d.cost, msgs: d.msgs, hour: d.hour };
       });
-      var linePath = smoothPath(pts);
-      var areaPathD = smoothArea(pts, pad.top + h);
+      var linePath = smoothPath(pts, pad.top, pad.top + h);
+      var areaPathD = smoothArea(pts, pad.top + h, pad.top);
 
       var gridLines2 = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
         var y = pad.top + h - pct * h;
@@ -2232,18 +2152,50 @@ body::before {
 
     var changeEl = document.getElementById('period-change');
     if (changeEl) {
-      var today = filtered.find(function(s) { return s.date === todayKey; });
-      var yd = new Date(); yd.setDate(yd.getDate() - 1);
-      var yesterdayKey = yd.toISOString().slice(0, 10);
-      var yesterday = filtered.find(function(s) { return s.date === yesterdayKey; });
-      var todayCost = today ? today.totalCost : 0;
-      var yesterdayCost = yesterday ? yesterday.totalCost : 0;
-      var costChange = yesterdayCost > 0 ? ((todayCost - yesterdayCost) / yesterdayCost) * 100 : 0;
-      var changeIcon = costChange > 0 ? '\u25B2' : costChange < 0 ? '\u25BC' : '\u2022';
-      var changeColor = costChange > 0 ? '#f38ba8' : costChange < 0 ? '#a6e3a1' : 'rgba(255,255,255,0.4)';
-      var changeText = costChange !== 0 ? Math.abs(costChange).toFixed(0) + '% vs yesterday' : 'same as yesterday';
-      changeEl.style.color = changeColor;
-      changeEl.textContent = changeIcon + ' ' + changeText;
+      // Compare current period vs previous equivalent period
+      var currentTotal = agg.totalCost;
+      var prevTotal = 0;
+      var compLabel = '';
+      if (period === 1) {
+        // Today vs yesterday
+        var todayData = filtered.find(function(s) { return s.date === todayKey; });
+        var yd = new Date(); yd.setDate(yd.getDate() - 1);
+        var yesterdayKey = yd.toISOString().slice(0, 10);
+        var yesterdayData = ALL_STATS.find(function(s) { return s.date === yesterdayKey; });
+        currentTotal = todayData ? todayData.totalCost : 0;
+        prevTotal = yesterdayData ? yesterdayData.totalCost : 0;
+        compLabel = 'vs yesterday';
+      } else if (period === 0) {
+        // All time — no comparison
+        changeEl.style.color = 'rgba(255,255,255,0.4)';
+        changeEl.textContent = agg.daysWithData + ' days tracked';
+        currentTotal = 0; prevTotal = 0; // skip change calc
+      } else {
+        // Compare this period vs the previous equivalent period
+        var prevCutoff = new Date();
+        prevCutoff.setDate(prevCutoff.getDate() - period * 2);
+        var prevCutoffStr = prevCutoff.toISOString().slice(0, 10);
+        var curCutoff = new Date();
+        curCutoff.setDate(curCutoff.getDate() - period);
+        var curCutoffStr = curCutoff.toISOString().slice(0, 10);
+        var prevStats = ALL_STATS.filter(function(s) { return s.date >= prevCutoffStr && s.date < curCutoffStr; });
+        prevTotal = prevStats.reduce(function(sum, s) { return sum + s.totalCost; }, 0);
+        compLabel = period === 7 ? 'vs prev week' : period === 30 ? 'vs prev month' : period === 365 ? 'vs prev year' : 'vs prev period';
+      }
+      if (period !== 0) {
+        if (prevTotal > 0) {
+          var costChange = ((currentTotal - prevTotal) / prevTotal) * 100;
+          var changeIcon = costChange > 0 ? '\u25B2' : costChange < 0 ? '\u25BC' : '\u2022';
+          var changeColor = costChange > 0 ? '#f38ba8' : costChange < 0 ? '#a6e3a1' : 'rgba(255,255,255,0.4)';
+          var changeText = costChange !== 0 ? Math.abs(costChange).toFixed(0) + '% ' + compLabel : 'no change';
+          changeEl.style.color = changeColor;
+          changeEl.textContent = changeIcon + ' ' + changeText;
+        } else {
+          // No previous period data to compare
+          changeEl.style.color = 'rgba(255,255,255,0.4)';
+          changeEl.textContent = '\u2022 no prior data';
+        }
+      }
     }
 
     var metaEl = document.getElementById('period-meta');
@@ -2292,22 +2244,50 @@ body::before {
     var cacheSavings = document.getElementById('cache-savings');
     if (cacheSavings) cacheSavings.textContent = '~' + fmtCost(agg.cacheSavings);
 
-    // Update daily table
-    var tbody = document.getElementById('daily-tbody');
-    if (tbody) {
-      var peakCost = agg.peakDay.totalCost || 1;
-      tbody.innerHTML = filtered.map(function(day) {
-        var isToday = day.date === todayKey;
-        return '<tr class="' + (isToday ? 'row-today' : '') + '">' +
-          '<td class="cell-date">' + fmtDate(day.date) + (isToday ? '<span class="badge-today">TODAY</span>' : '') + '</td>' +
-          '<td class="cell-cost">' + fmtCost(day.totalCost) + '</td>' +
-          '<td class="cell-tokens">' + fmtTokens(day.inputTokens + day.outputTokens) + '</td>' +
-          '<td class="cell-msgs">' + day.messageCount + '</td>' +
-          '<td class="cell-bar"><div class="mini-bar"><div class="mini-bar-fill" style="width:' + (peakCost > 0 ? (day.totalCost / peakCost * 100) : 0) + '%"></div></div></td></tr>';
+    // Update tool usage
+    var toolList = document.getElementById('tool-list');
+    var toolBadge = document.getElementById('tool-badge');
+    if (toolList) {
+      var toolColors = ['#89b4fa','#a6e3a1','#fab387','#f38ba8','#f9e2af','#cba6f7','#94e2d5','#b4befe','#74c7ec','#f2cdcd'];
+      var sortedTools = Object.keys(agg.toolUsage).sort(function(a, b) { return agg.toolUsage[b] - agg.toolUsage[a]; });
+      var totalToolCalls = sortedTools.reduce(function(s, t) { return s + agg.toolUsage[t]; }, 0);
+      if (toolBadge) toolBadge.textContent = totalToolCalls + ' calls';
+      toolList.innerHTML = sortedTools.slice(0, 15).map(function(name, i) {
+        var count = agg.toolUsage[name];
+        var pct = totalToolCalls > 0 ? (count / totalToolCalls) * 100 : 0;
+        var color = toolColors[i % toolColors.length];
+        var shortName = name.indexOf('__') >= 0 ? name.split('__').pop() : name;
+        return '<div class="tool-row"><span class="tool-name" title="' + name + '">' + shortName + '</span><div class="tool-bar-bg"><div class="tool-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div><span class="tool-count">' + count + '</span><span class="tool-pct">' + pct.toFixed(0) + '%</span></div>';
       }).join('');
     }
-    var peakBadge = document.getElementById('daily-peak-badge');
-    if (peakBadge) peakBadge.textContent = 'PEAK: ' + fmtDate(agg.peakDay.date) + ' at ' + fmtCost(agg.peakDay.totalCost);
+
+    // Update activity heatmap
+    var heatmapGrid = document.getElementById('heatmap-grid');
+    var sessionsBadge = document.getElementById('sessions-badge');
+    if (heatmapGrid) {
+      var maxHourly = Math.max.apply(null, agg.hourlyActivity.concat([1]));
+      if (sessionsBadge) sessionsBadge.textContent = agg.totalSessions + ' sessions';
+      heatmapGrid.innerHTML = agg.hourlyActivity.map(function(count, h) {
+        var intensity = maxHourly > 0 ? count / maxHourly : 0;
+        var bg = count === 0 ? 'rgba(255,255,255,0.03)' : 'rgba(137,180,250,' + (0.15 + intensity * 0.85) + ')';
+        return '<div class="heatmap-cell" style="background:' + bg + '" data-tip-date="' + String(h).padStart(2, '0') + ':00 \u2013 ' + String(h).padStart(2, '0') + ':59" data-tip-cost="' + count + ' messages" data-tip-msgs="" data-tip-tokens=""></div>';
+      }).join('');
+    }
+
+    // Update projects
+    var projectList = document.getElementById('project-list');
+    var projectsBadge = document.getElementById('projects-badge');
+    if (projectList) {
+      var sortedProjects = Object.keys(agg.projectBreakdown).sort(function(a, b) { return agg.projectBreakdown[b].cost - agg.projectBreakdown[a].cost; });
+      var maxProjCost = sortedProjects.length > 0 ? agg.projectBreakdown[sortedProjects[0]].cost : 1;
+      if (projectsBadge) projectsBadge.textContent = sortedProjects.length + ' active';
+      projectList.innerHTML = sortedProjects.slice(0, 10).map(function(name) {
+        var data = agg.projectBreakdown[name];
+        var shortName = name.split('/').pop() || name;
+        var barPct = maxProjCost > 0 ? (data.cost / maxProjCost) * 100 : 0;
+        return '<div class="project-row"><div class="project-info"><div class="project-name" title="' + name + '">' + shortName + '</div><div class="project-bar-inline"><div class="project-bar-fill" style="width:' + barPct + '%"></div></div></div><span class="project-cost">' + fmtCost(data.cost) + '</span><span class="project-msgs">' + data.messages + ' msgs</span></div>';
+      }).join('');
+    }
   }
 
   // ── Animate SVG line lengths ──
@@ -2328,12 +2308,19 @@ body::before {
       area.offsetHeight;
       area.style.animation = '';
     });
-    // Stagger dot animations
-    document.querySelectorAll('.data-dot').forEach(function(dot, i) {
+    // Stagger dot animations — hide dots on dense charts (>10 points)
+    var dots = document.querySelectorAll('.data-dot');
+    var hideDots = dots.length > 10;
+    dots.forEach(function(dot, i) {
       dot.style.animation = 'none';
       dot.offsetHeight;
-      dot.style.animation = 'dotPopIn 0.3s ease-out both';
-      dot.style.animationDelay = (0.5 + i * 0.04) + 's';
+      if (hideDots) {
+        dot.setAttribute('opacity', '0');
+        dot.setAttribute('r', '0');
+      } else {
+        dot.style.animation = 'dotPopIn 0.3s ease-out both';
+        dot.style.animationDelay = (0.5 + i * 0.04) + 's';
+      }
     });
   }
 
@@ -2384,9 +2371,22 @@ body::before {
 
         tipTitle.textContent = p.date;
         tipRows.innerHTML = '';
-        addRow('Cost', p.cost);
-        addRow('Messages', p.msgs);
-        addRow('Tokens', p.tokens);
+        addRow('Cost', p.cost, 'tip-value-cost');
+        addRow('Messages', p.msgs, 'tip-value-msgs');
+        addRow('Tokens', p.tokens, 'tip-value-tokens');
+        // Model distribution
+        if (p.models && p.models.length > 0) {
+          var modelColors = ['#89b4fa','#a6e3a1','#fab387','#f38ba8','#f9e2af','#cba6f7','#94e2d5'];
+          var sep = document.createElement('div');
+          sep.style.cssText = 'border-top:1px solid rgba(255,255,255,0.08);margin:5px 0 3px;';
+          tipRows.appendChild(sep);
+          p.models.forEach(function(model, mi) {
+            var row = document.createElement('div');
+            row.className = 'tip-row';
+            row.innerHTML = '<span class="tip-label"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:' + modelColors[mi % modelColors.length] + ';margin-right:4px;vertical-align:middle"></span>' + model.n + '</span><span class="tip-value-cost">' + model.c + '</span>';
+            tipRows.appendChild(row);
+          });
+        }
 
         var dotScreenPt = svg.createSVGPoint();
         dotScreenPt.x = p.x;
@@ -2429,9 +2429,9 @@ body::before {
       if (!date) return;
       tipTitle.textContent = date;
       tipRows.innerHTML = '';
-      if (cost) addRow('Cost', cost);
-      if (msgs) addRow('Messages', msgs);
-      if (tokens) addRow('Tokens', tokens);
+      if (cost) addRow('Cost', cost, 'tip-value-cost');
+      if (msgs) addRow('Messages', msgs, 'tip-value-msgs');
+      if (tokens) addRow('Tokens', tokens, 'tip-value-tokens');
       var vw = window.innerWidth;
       var x = e.clientX + 14, y = e.clientY - 10;
       if (x + 180 > vw) x = e.clientX - 180;
@@ -2471,18 +2471,6 @@ body::before {
       switchPeriod(currentPeriod);
     });
   });
-
-  // ── Daily breakdown collapse toggle ──
-  var dailyToggle = document.getElementById('daily-toggle');
-  var dailyBody = document.getElementById('daily-body');
-  if (dailyToggle && dailyBody) {
-    dailyToggle.addEventListener('click', function() {
-      var expanded = dailyBody.classList.toggle('expanded');
-      dailyToggle.classList.toggle('expanded', expanded);
-      dailyToggle.setAttribute('aria-expanded', expanded.toString());
-      dailyToggle.childNodes[0].textContent = expanded ? 'Hide ' : 'Show ';
-    });
-  }
 
   // ── Initial chart listeners ──
   attachChartListeners();
