@@ -2,7 +2,7 @@
   "name": "claude-code-usage-dashboard",
   "displayName": "Claude Code Usage Dashboard",
   "description": "Monitor Claude Code rate limits, costs, and token usage directly in your VS Code status bar with an analytics dashboard",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "man-vu",
   "icon": "images/icon.png",
   "license": "MIT",

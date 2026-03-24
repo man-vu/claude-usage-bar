@@ -193,6 +193,29 @@ function fmtDateShort(d: string): string {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+// ── Catmull-Rom to cubic bezier smooth path (server-side) ─────────────
+function smoothPathTS(pts: { x: number; y: number }[]): string {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return `M${pts[0].x},${pts[0].y} L${pts[1].x},${pts[1].y}`;
+  let d = `M${pts[0].x},${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? 0 : i - 1];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1];
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+  }
+  return d;
+}
+function smoothAreaTS(pts: { x: number; y: number }[], baseY: number): string {
+  if (pts.length < 2) return "";
+  return smoothPathTS(pts) + ` L${pts[pts.length - 1].x},${baseY} L${pts[0].x},${baseY} Z`;
+}
+
 // ── SVG Charts (with data attributes for JS tooltips) ─────────────────
 
 function buildAreaChart(days: DailyStats[], width: number, height: number): string {
@@ -212,8 +235,8 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
     date: d.date,
   }));
 
-  const linePoints = points.map(p => `${p.x},${p.y}`).join(" ");
-  const areaPoints = `${pad.left},${pad.top + h} ${linePoints} ${points[points.length - 1].x},${pad.top + h}`;
+  const linePath = smoothPathTS(points);
+  const areaPath = smoothAreaTS(points, pad.top + h);
 
   const gridLines = [0, 0.25, 0.5, 0.75, 1].map(pct => {
     const y = pad.top + h - pct * h;
@@ -251,8 +274,8 @@ function buildAreaChart(days: DailyStats[], width: number, height: number): stri
       </linearGradient>
     </defs>
     ${gridLines}
-    <polygon points="${areaPoints}" fill="url(#areaGrad)"/>
-    <polyline points="${linePoints}" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${areaPath}" fill="url(#areaGrad)" class="chart-area-fill"/>
+    <path d="${linePath}" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
     ${xLabels}
     ${dots}
     <!-- Tracking elements (hidden by default, driven by JS) -->
@@ -296,33 +319,74 @@ function buildDonutChart(models: Record<string, { cost: number; messages: number
   </svg>`;
 }
 
-function buildTokenStackedBars(days: DailyStats[], width: number, height: number): string {
+function buildTokenAreaChart(days: DailyStats[], width: number, height: number): string {
+  if (days.length === 0) return "";
   const sorted = days.slice().sort((a, b) => a.date.localeCompare(b.date));
-  if (sorted.length === 0) return "";
-  const maxTokens = Math.max(...sorted.map(d => d.inputTokens + d.outputTokens), 1);
-  const pad = { top: 12, right: 16, bottom: 32, left: 8 };
+  const maxTokens = Math.max(...sorted.map(d => Math.max(d.inputTokens, d.outputTokens)), 1);
+  const pad = { top: 20, right: 16, bottom: 36, left: 56 };
   const w = width - pad.left - pad.right;
   const h = height - pad.top - pad.bottom;
-  const barW = Math.min(w / sorted.length - 4, 32);
-  const gap = (w - barW * sorted.length) / (sorted.length + 1);
 
-  const bars = sorted.map((d, i) => {
-    const x = pad.left + gap + i * (barW + gap);
-    const totalH = ((d.inputTokens + d.outputTokens) / maxTokens) * h;
-    const inputH = (d.inputTokens / (d.inputTokens + d.outputTokens || 1)) * totalH;
-    const outputH = totalH - inputH;
-    const baseY = pad.top + h;
-    return `<g class="bar-group"
-              data-tip-date="${fmtDate(d.date)}" data-tip-cost="Input: ${fmtTokens(d.inputTokens)}" data-tip-msgs="Output: ${fmtTokens(d.outputTokens)}" data-tip-tokens="Total: ${fmtTokens(d.inputTokens + d.outputTokens)}">
-            <rect x="${x}" y="${baseY - totalH}" width="${barW}" height="${inputH}" rx="3" fill="#89b4fa" opacity="0.7"/>
-            <rect x="${x}" y="${baseY - outputH}" width="${barW}" height="${outputH}" rx="0" fill="#a6e3a1" opacity="0.7"/>
-            <rect x="${x}" y="${baseY - totalH}" width="${barW}" height="${totalH}" rx="3" fill="transparent" class="bar-hover-target"/>
-            </g>
-            <text x="${x + barW / 2}" y="${baseY + 16}" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-size="9">${fmtDateShort(d.date)}</text>`;
+  const inputPts = sorted.map((d, i) => ({
+    x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w,
+    y: pad.top + h - (d.inputTokens / maxTokens) * h,
+    val: d.inputTokens, date: d.date,
+  }));
+  const outputPts = sorted.map((d, i) => ({
+    x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w,
+    y: pad.top + h - (d.outputTokens / maxTokens) * h,
+    val: d.outputTokens, date: d.date,
+  }));
+
+  const inputLinePath = smoothPathTS(inputPts);
+  const outputLinePath = smoothPathTS(outputPts);
+  const inputAreaPathD = smoothAreaTS(inputPts, pad.top + h);
+  const outputAreaPathD = smoothAreaTS(outputPts, pad.top + h);
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map(pct => {
+    const y = pad.top + h - pct * h;
+    const val = pct * maxTokens;
+    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+            <text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">${fmtTokens(val)}</text>`;
   }).join("\n");
 
-  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg">
-    ${bars}
+  const xLabels = inputPts.filter((_, i) => i % Math.max(1, Math.floor(inputPts.length / 7)) === 0 || i === inputPts.length - 1)
+    .map(p => `<text x="${p.x}" y="${pad.top + h + 24}" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">${fmtDateShort(p.date)}</text>`)
+    .join("\n");
+
+  // Data points for tooltips
+  const pointData = JSON.stringify(sorted.map((d, i) => ({
+    x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1),
+    date: fmtDate(d.date), cost: "Input: " + fmtTokens(d.inputTokens),
+    msgs: "Output: " + fmtTokens(d.outputTokens),
+    tokens: "Total: " + fmtTokens(d.inputTokens + d.outputTokens)
+  })));
+
+  const inputDots = inputPts.map((p, i) =>
+    `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="${i}" opacity="0.4"/>`
+  ).join("\n");
+
+  return `<svg width="100%" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points='${pointData}' data-pad-left="${pad.left}" data-pad-top="${pad.top}" data-chart-h="${h}">
+    <defs>
+      <linearGradient id="inputAreaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/>
+      </linearGradient>
+      <linearGradient id="outputAreaGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.2"/>
+        <stop offset="100%" stop-color="#a6e3a1" stop-opacity="0.02"/>
+      </linearGradient>
+    </defs>
+    ${gridLines}
+    <path d="${outputAreaPathD}" fill="url(#outputAreaGrad)" class="chart-area-fill"/>
+    <path d="${outputLinePath}" fill="none" stroke="#a6e3a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" class="chart-line"/>
+    <path d="${inputAreaPathD}" fill="url(#inputAreaGrad)" class="chart-area-fill"/>
+    <path d="${inputLinePath}" fill="none" stroke="#89b4fa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>
+    ${xLabels}
+    ${inputDots}
+    <line id="track-line" x1="0" y1="${pad.top}" x2="0" y2="${pad.top + h}" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>
+    <circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>
+    <rect id="chart-overlay" x="${pad.left}" y="${pad.top}" width="${w}" height="${h}" fill="transparent" style="cursor:crosshair"/>
   </svg>`;
 }
 
@@ -360,7 +424,6 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
   const d = compute(stats);
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
-  const msgSparkValues = chartDays.map(s => s.messageCount);
   const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens + s.cacheWriteTokens + s.cacheReadTokens);
 
   const changeIcon = d.costChange > 0 ? "&#9650;" : d.costChange < 0 ? "&#9660;" : "&#8226;";
@@ -621,12 +684,6 @@ body::before {
   gap: 14px;
   margin-bottom: 14px;
 }
-.kpi-bottom {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  margin-bottom: 20px;
-}
 .kpi-card { position: relative; overflow: hidden; }
 .kpi-card::before {
   content: '';
@@ -636,9 +693,7 @@ body::before {
   border-radius: var(--radius) var(--radius) 0 0;
 }
 .kpi-card.kpi-cost::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-teal)); }
-.kpi-card.kpi-week::before { background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple)); }
 .kpi-card.kpi-tokens::before { background: linear-gradient(90deg, var(--accent-peach), var(--accent-yellow)); }
-.kpi-card.kpi-msgs::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-red)); }
 
 .kpi-header {
   display: flex;
@@ -662,9 +717,7 @@ body::before {
   line-height: 1.1;
 }
 .kpi-cost .kpi-value { color: var(--accent-green); }
-.kpi-week .kpi-value { color: var(--accent-blue); }
 .kpi-tokens .kpi-value { color: var(--accent-peach); }
-.kpi-msgs .kpi-value { color: var(--accent-purple); }
 .kpi-sub {
   display: flex;
   align-items: center;
@@ -873,8 +926,41 @@ body::before {
   letter-spacing: 0.05em;
 }
 
-/* ── Daily breakdown table ── */
+/* ── Daily breakdown table (collapsible) ── */
 .table-card { padding: 18px; }
+.collapse-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.collapse-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(255,255,255,0.04);
+}
+.collapse-toggle svg {
+  transition: transform 0.25s ease;
+}
+.collapse-toggle.expanded svg {
+  transform: rotate(180deg);
+}
+.collapsible-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.35s ease;
+}
+.collapsible-body.expanded {
+  max-height: 2000px;
+}
 .daily-table {
   width: 100%;
   border-collapse: collapse;
@@ -963,23 +1049,200 @@ body::before {
 .tip-label { color: var(--text-secondary); }
 .tip-value { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
 
+/* ── SVG animations ── */
+@keyframes lineDrawIn {
+  from { stroke-dashoffset: var(--line-length); }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes areaFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dotPopIn {
+  from { r: 0; opacity: 0; }
+  to { r: 3; opacity: 0.4; }
+}
+.chart-line {
+  stroke-dasharray: var(--line-length);
+  stroke-dashoffset: 0;
+  animation: lineDrawIn 1s ease-out both;
+}
+.chart-area-fill {
+  animation: areaFadeIn 0.8s ease-out 0.3s both;
+}
+.data-dot {
+  animation: dotPopIn 0.3s ease-out both;
+}
+
 /* ── SVG interactions ── */
 .data-dot { transition: r 0.15s, filter 0.15s; cursor: pointer; }
 .data-dot:hover { r: 7; filter: drop-shadow(0 0 6px rgba(137,180,250,0.6)); }
 .donut-segment { transition: opacity 0.15s, filter 0.15s; cursor: pointer; }
 .donut-segment:hover { opacity: 1 !important; filter: drop-shadow(0 0 8px rgba(255,255,255,0.15)); }
-.bar-hover-target { cursor: pointer; }
-.bar-group:hover rect:not(.bar-hover-target) { opacity: 1 !important; filter: brightness(1.2); }
+
+/* ── Chart draw animations ── */
+@keyframes lineDrawIn {
+  from { stroke-dashoffset: var(--line-length); }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes areaFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes dotPopIn {
+  0% { r: 0; opacity: 0; }
+  100% { r: 3; opacity: 0.4; }
+}
+.chart-line {
+  stroke-dasharray: var(--line-length);
+  stroke-dashoffset: 0;
+  animation: lineDrawIn 1s ease-out both;
+}
+.chart-area-fill {
+  opacity: 0;
+  animation: areaFadeIn 0.6s ease-out both;
+  animation-delay: 0.4s;
+}
+
+/* ── Period tabs (financial-style) ── */
+.period-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: fit-content;
+}
+.period-tab {
+  padding: 5px 14px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+.period-tab:hover {
+  color: var(--text-secondary);
+  background: rgba(255,255,255,0.04);
+}
+.period-tab.active {
+  color: var(--text-primary);
+  background: rgba(137,180,250,0.15);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+
+/* Period summary line */
+.period-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.period-total {
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: var(--accent-green);
+  line-height: 1;
+}
+.period-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.05);
+}
+.period-meta {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+
+/* Chart mode toggle (Cost / Tokens) */
+.chart-mode-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chart-mode-tab {
+  padding: 4px 12px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chart-mode-tab:hover {
+  color: var(--text-secondary);
+  background: rgba(255,255,255,0.04);
+}
+.chart-mode-tab.active {
+  color: var(--text-primary);
+  background: rgba(137,180,250,0.15);
+}
+.chart-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+.chart-subtitle .token-legend-inline {
+  display: flex;
+  gap: 12px;
+}
+.chart-subtitle .token-legend-inline .tl-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.chart-subtitle .token-legend-inline .tl-dot {
+  width: 8px; height: 8px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* Chart area with smooth transitions */
+.chart-area {
+  position: relative;
+  transition: opacity 0.2s ease;
+}
+.chart-area.transitioning {
+  opacity: 0.4;
+}
 
 /* ── Responsive ── */
 @media (max-width: 800px) {
   .kpi-top { grid-template-columns: 1fr; }
-  .kpi-bottom { grid-template-columns: 1fr; }
   .charts-row { grid-template-columns: 1fr; }
   .secondary-row { grid-template-columns: 1fr; }
   .insights-row { grid-template-columns: 1fr; }
   .donut-layout { flex-direction: column; }
   .token-gauges { flex-wrap: wrap; }
+  .period-tabs { flex-wrap: wrap; }
 }
 @media (max-width: 500px) {
   .kpi-grid { grid-template-columns: 1fr; }
@@ -994,13 +1257,11 @@ body::before {
 .card, .sub-banner { animation: fadeUp 0.4s ease-out both; }
 .kpi-top .card:nth-child(1) { animation-delay: 0.05s; }
 .kpi-top .card:nth-child(2) { animation-delay: 0.1s; }
-.kpi-bottom .card:nth-child(1) { animation-delay: 0.15s; }
-.kpi-bottom .card:nth-child(2) { animation-delay: 0.2s; }
-.charts-row .card:nth-child(1) { animation-delay: 0.25s; }
-.charts-row .card:nth-child(2) { animation-delay: 0.3s; }
-.secondary-row .card:nth-child(1) { animation-delay: 0.35s; }
-.secondary-row .card:nth-child(2) { animation-delay: 0.4s; }
-.table-card { animation-delay: 0.45s; }
+.charts-row .card:nth-child(1) { animation-delay: 0.2s; }
+.charts-row .card:nth-child(2) { animation-delay: 0.25s; }
+.secondary-row .card:nth-child(1) { animation-delay: 0.3s; }
+.secondary-row .card:nth-child(2) { animation-delay: 0.35s; }
+.table-card { animation-delay: 0.4s; }
 
 /* ── Donation top strip ── */
 .donate-strip {
@@ -1260,7 +1521,7 @@ body::before {
         Refresh
       </button>
       <div class="header-meta">
-        Last 7 days &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        <span id="header-period-label">Last 7 days</span> &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </div>
     </div>
   </div>
@@ -1353,72 +1614,52 @@ body::before {
     </div>
   </div>
 
-  <!-- KPI Bottom Row: 7-Day Total + Messages -->
-  <div class="kpi-bottom">
-    <div class="card kpi-card kpi-week">
-      <div class="kpi-header">
-        <div class="kpi-header-left">
-          <div class="kpi-label">7-Day Total</div>
-          <div class="kpi-value">${fmtCost(d.totalCost)}</div>
-          <div class="kpi-sub">avg ${fmtCost(d.avgDailyCost)}/day &middot; peak ${fmtCost(d.peakDay.totalCost)}</div>
+  <!-- Usage Trend — Unified Cost + Tokens with mode toggle -->
+  <div class="card" style="margin-bottom:14px">
+    <div class="section-header">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="section-title" id="chart-section-title">Cost Trend${isSubscription ? " (API Equivalent)" : ""}</span>
+        <div class="chart-mode-tabs" id="chart-mode-tabs">
+          <button class="chart-mode-tab active" data-mode="cost">Cost</button>
+          <button class="chart-mode-tab" data-mode="tokens">Tokens</button>
         </div>
-        <div class="kpi-sparkline">${buildSparkline(costSparkValues, 80, 36, "rgba(137,180,250,0.6)")}</div>
+      </div>
+      <div class="period-tabs" id="period-tabs">
+        <button class="period-tab" data-period="1">1D</button>
+        <button class="period-tab active" data-period="7">1W</button>
+        <button class="period-tab" data-period="30">1M</button>
+        <button class="period-tab" data-period="365">1Y</button>
+        <button class="period-tab" data-period="0">ALL</button>
       </div>
     </div>
-    <div class="card kpi-card kpi-msgs">
-      <div class="kpi-header">
-        <div class="kpi-header-left">
-          <div class="kpi-label">Messages This Week</div>
-          <div class="kpi-value">${d.totalMessages}</div>
-          <div class="kpi-sub">${d.today.messageCount} today &middot; ${fmtTokens(d.totalInput + d.totalOutput + d.totalCacheWrite + d.totalCacheRead)} tokens total</div>
-        </div>
-        <div class="kpi-sparkline">${buildSparkline(msgSparkValues, 80, 36, "rgba(203,166,247,0.6)")}</div>
+    <div class="period-summary">
+      <span class="period-total" id="period-total">${fmtCost(d.totalCost)}</span>
+      <span class="period-change" id="period-change" style="color:${changeColor}">${changeIcon} ${changeText}</span>
+    </div>
+    <div class="period-meta" id="period-meta">${d.stats.length} days &middot; avg ${fmtCost(d.avgDailyCost)}/day &middot; peak ${fmtCost(d.peakDay.totalCost)} on ${fmtDate(d.peakDay.date)}</div>
+    <div class="chart-area" id="chart-area" style="margin-top:12px">
+      ${buildAreaChart(chartDays, 700, 220)}
+    </div>
+    <div class="chart-subtitle" id="chart-subtitle" style="display:none">
+      <div class="token-legend-inline">
+        <span class="tl-item"><span class="tl-dot" style="background:var(--accent-blue)"></span> Input <strong id="token-input-label">${fmtTokens(d.totalInput)}</strong></span>
+        <span class="tl-item"><span class="tl-dot" style="background:var(--accent-green)"></span> Output <strong id="token-output-label">${fmtTokens(d.totalOutput)}</strong></span>
       </div>
+      <span class="section-badge" id="token-badge">${fmtTokens(d.totalInput + d.totalOutput + d.totalCacheWrite + d.totalCacheRead)} TOTAL</span>
     </div>
   </div>
 
-  <!-- Charts Row -->
+  <!-- Charts Row: Model + Cache -->
   <div class="charts-row">
-    <div class="card">
-      <div class="section-header">
-        <span class="section-title">Cost Trend${isSubscription ? " (API Equivalent)" : ""}</span>
-        <span class="section-badge">7 DAYS</span>
-      </div>
-      <div class="chart-container">
-        ${buildAreaChart(chartDays, 600, 200)}
-      </div>
-    </div>
-    <div class="card">
+    <div class="card" id="model-card">
       <div class="section-header">
         <span class="section-title">Model Distribution</span>
+        <span class="section-badge" id="model-badge">${fmtCost(d.totalCost)}</span>
       </div>
-      <div class="donut-layout">
+      <div class="donut-layout" id="model-donut-area">
         ${buildDonutChart(d.modelTotals, 140)}
-        <div class="legend">
+        <div class="legend" id="model-legend">
           ${modelLegend}
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Secondary Row -->
-  <div class="secondary-row">
-    <div class="card">
-      <div class="section-header">
-        <span class="section-title">Token Usage</span>
-        <span class="section-badge">${fmtTokens(d.totalInput + d.totalOutput + d.totalCacheWrite + d.totalCacheRead)} TOTAL</span>
-      </div>
-      <div class="chart-container">
-        ${buildTokenStackedBars(chartDays, 480, 150)}
-      </div>
-      <div class="token-legend">
-        <div class="token-legend-item">
-          <span class="token-legend-dot" style="background:var(--accent-blue)"></span>
-          Input ${fmtTokens(d.totalInput)}
-        </div>
-        <div class="token-legend-item">
-          <span class="token-legend-dot" style="background:var(--accent-green)"></span>
-          Output ${fmtTokens(d.totalOutput)}
         </div>
       </div>
     </div>
@@ -1426,21 +1667,21 @@ body::before {
       <div class="section-header">
         <span class="section-title">Cache Performance</span>
       </div>
-      <div class="cache-grid">
+      <div class="cache-grid" id="cache-grid">
         <div class="cache-stat">
-          <div class="cache-stat-val">${fmtTokens(d.totalCacheRead)}</div>
+          <div class="cache-stat-val" id="cache-reads">${fmtTokens(d.totalCacheRead)}</div>
           <div class="cache-stat-label">Cache Reads</div>
         </div>
         <div class="cache-stat">
-          <div class="cache-stat-val">${fmtTokens(d.totalCacheWrite)}</div>
+          <div class="cache-stat-val" id="cache-writes">${fmtTokens(d.totalCacheWrite)}</div>
           <div class="cache-stat-label">Cache Writes</div>
         </div>
         <div class="cache-stat">
-          <div class="cache-stat-val">${(d.totalCacheRead + d.totalInput) > 0 ? ((d.totalCacheRead / (d.totalCacheRead + d.totalInput)) * 100).toFixed(0) : 0}%</div>
+          <div class="cache-stat-val" id="cache-hit-rate">${(d.totalCacheRead + d.totalInput) > 0 ? ((d.totalCacheRead / (d.totalCacheRead + d.totalInput)) * 100).toFixed(0) : 0}%</div>
           <div class="cache-stat-label">Hit Rate</div>
         </div>
         <div class="cache-stat">
-          <div class="cache-stat-val">~${fmtCost(d.cacheSavings)}</div>
+          <div class="cache-stat-val" id="cache-savings">~${fmtCost(d.cacheSavings)}</div>
           <div class="cache-stat-label">Est. Savings</div>
         </div>
       </div>
@@ -1525,26 +1766,34 @@ body::before {
     </div>
   </div>
 
-  <!-- Daily Breakdown -->
+  <!-- Daily Breakdown (collapsible) -->
   <div class="card table-card">
     <div class="section-header">
       <span class="section-title">Daily Breakdown</span>
-      <span class="section-badge">PEAK: ${fmtDate(d.peakDay.date)} at ${fmtCost(d.peakDay.totalCost)}</span>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="section-badge" id="daily-peak-badge">PEAK: ${fmtDate(d.peakDay.date)} at ${fmtCost(d.peakDay.totalCost)}</span>
+        <button class="collapse-toggle" id="daily-toggle" aria-expanded="false" aria-controls="daily-body">
+          Show
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
     </div>
-    <table class="daily-table">
-      <thead>
-        <tr>
-          <th>Day</th>
-          <th>Cost${isSubscription ? " (API)" : ""}</th>
-          <th>Tokens</th>
-          <th>Messages</th>
-          <th style="width:25%">Usage</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${dailyRows}
-      </tbody>
-    </table>
+    <div class="collapsible-body" id="daily-body">
+      <table class="daily-table">
+        <thead>
+          <tr>
+            <th>Day</th>
+            <th>Cost${isSubscription ? " (API)" : ""}</th>
+            <th>Tokens</th>
+            <th>Messages</th>
+            <th style="width:25%">Usage</th>
+          </tr>
+        </thead>
+        <tbody id="daily-tbody">
+          ${dailyRows}
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Support -->
@@ -1561,114 +1810,630 @@ body::before {
 
 <script>
 (function() {
+  // ── All stats data embedded as JSON ──
+  const ALL_STATS = ${JSON.stringify(stats.map(s => ({
+    date: s.date,
+    totalCost: s.totalCost,
+    inputTokens: s.inputTokens,
+    outputTokens: s.outputTokens,
+    cacheWriteTokens: s.cacheWriteTokens,
+    cacheReadTokens: s.cacheReadTokens,
+    messageCount: s.messageCount,
+    modelBreakdown: s.modelBreakdown,
+    toolUsage: s.toolUsage,
+    hourlyActivity: s.hourlyActivity,
+    sessionCount: s.sessionCount,
+    projectBreakdown: s.projectBreakdown
+  })))};
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  let currentPeriod = 7;
+
+  // ── Tooltip setup ──
   const tooltip = document.getElementById('chart-tooltip');
   const tipTitle = document.getElementById('tip-title');
   const tipRows = document.getElementById('tip-rows');
-  const chart = document.getElementById('cost-chart');
-  const trackLine = document.getElementById('track-line');
-  const trackDot = document.getElementById('track-dot');
 
-  // Parse embedded point data from the SVG
-  let chartPoints = [];
-  if (chart) {
-    try { chartPoints = JSON.parse(chart.getAttribute('data-points') || '[]'); } catch(e) {}
+  function addRow(label, value) {
+    const row = document.createElement('div');
+    row.className = 'tip-row';
+    row.innerHTML = '<span class="tip-label">' + label + '</span><span class="tip-value">' + value + '</span>';
+    tipRows.appendChild(row);
   }
 
-  // ── Proximity-based chart interaction ──
-  const overlay = document.getElementById('chart-overlay');
-  let activeIdx = -1;
+  // ── Catmull-Rom to cubic bezier smooth path ──
+  function smoothPath(pts) {
+    // pts: array of {x, y}
+    if (pts.length < 2) return '';
+    if (pts.length === 2) return 'M' + pts[0].x + ',' + pts[0].y + ' L' + pts[1].x + ',' + pts[1].y;
+    var d = 'M' + pts[0].x + ',' + pts[0].y;
+    for (var i = 0; i < pts.length - 1; i++) {
+      var p0 = pts[i === 0 ? 0 : i - 1];
+      var p1 = pts[i];
+      var p2 = pts[i + 1];
+      var p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1];
+      var cp1x = p1.x + (p2.x - p0.x) / 6;
+      var cp1y = p1.y + (p2.y - p0.y) / 6;
+      var cp2x = p2.x - (p3.x - p1.x) / 6;
+      var cp2y = p2.y - (p3.y - p1.y) / 6;
+      d += ' C' + cp1x.toFixed(1) + ',' + cp1y.toFixed(1) + ' ' + cp2x.toFixed(1) + ',' + cp2y.toFixed(1) + ' ' + p2.x.toFixed(1) + ',' + p2.y.toFixed(1);
+    }
+    return d;
+  }
+  function smoothArea(pts, baseY) {
+    if (pts.length < 2) return '';
+    var pathD = smoothPath(pts);
+    return pathD + ' L' + pts[pts.length - 1].x + ',' + baseY + ' L' + pts[0].x + ',' + baseY + ' Z';
+  }
 
-  if (overlay && chartPoints.length > 0) {
-    overlay.addEventListener('mousemove', function(e) {
-      // Convert mouse position to SVG coordinate space
-      const svg = chart;
-      const pt = svg.createSVGPoint();
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      const svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
+  // ── Formatters (mirror server-side) ──
+  function fmtTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return n.toString();
+  }
+  function fmtCost(n) {
+    return n < 10 ? '$' + n.toFixed(2) : '$' + n.toFixed(1);
+  }
+  function fmtDate(d) {
+    const dt = new Date(d + 'T00:00:00');
+    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  function fmtDateShort(d) {
+    const dt = new Date(d + 'T00:00:00');
+    return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+  function fmtModel(model) {
+    var stripped = model.replace('claude-', '').replace(/-[0-9]{8,}$/, '');
+    var m = stripped.match(/^([a-z]+)-([0-9]+)-([0-9]+)$/i);
+    if (m) return m[1].charAt(0).toUpperCase() + m[1].slice(1) + ' ' + m[2] + '.' + m[3];
+    return stripped.split('-').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ');
+  }
 
-      // Find nearest point by X distance
-      let minDist = Infinity, nearest = 0;
-      for (let i = 0; i < chartPoints.length; i++) {
-        const dist = Math.abs(chartPoints[i].x - svgPt.x);
-        if (dist < minDist) { minDist = dist; nearest = i; }
+  // ── Filter stats by period ──
+  function filterByPeriod(period) {
+    if (period === 0) return ALL_STATS.slice(); // ALL
+    var cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - period);
+    var cutoffStr = cutoff.toISOString().slice(0, 10);
+    return ALL_STATS.filter(function(s) { return s.date >= cutoffStr; });
+  }
+
+  // ── Compute aggregates for filtered data ──
+  function computeFiltered(stats) {
+    var totalCost = 0, totalMsgs = 0, totalInput = 0, totalOutput = 0, totalCacheWrite = 0, totalCacheRead = 0;
+    var modelTotals = {};
+    stats.forEach(function(s) {
+      totalCost += s.totalCost;
+      totalMsgs += s.messageCount;
+      totalInput += s.inputTokens;
+      totalOutput += s.outputTokens;
+      totalCacheWrite += s.cacheWriteTokens;
+      totalCacheRead += s.cacheReadTokens;
+      Object.keys(s.modelBreakdown || {}).forEach(function(m) {
+        if (!modelTotals[m]) modelTotals[m] = { cost: 0, messages: 0, inputTokens: 0, outputTokens: 0 };
+        modelTotals[m].cost += s.modelBreakdown[m].cost;
+        modelTotals[m].messages += s.modelBreakdown[m].messages;
+        modelTotals[m].inputTokens += s.modelBreakdown[m].inputTokens;
+        modelTotals[m].outputTokens += s.modelBreakdown[m].outputTokens;
+      });
+    });
+    var daysWithData = stats.filter(function(s) { return s.messageCount > 0; }).length || 1;
+    var avgDailyCost = totalCost / daysWithData;
+    var peakDay = stats.reduce(function(max, d) { return d.totalCost > max.totalCost ? d : max; }, stats[0] || { date: todayKey, totalCost: 0 });
+    var cacheSavings = totalCacheRead * 0.9 * 3 / 1000000;
+    return {
+      totalCost: totalCost, totalMsgs: totalMsgs, totalInput: totalInput, totalOutput: totalOutput,
+      totalCacheWrite: totalCacheWrite, totalCacheRead: totalCacheRead,
+      avgDailyCost: avgDailyCost, peakDay: peakDay, modelTotals: modelTotals, cacheSavings: cacheSavings,
+      daysWithData: daysWithData
+    };
+  }
+
+  // ── Build area chart SVG ──
+  function buildAreaChartSVG(days, width, height) {
+    if (days.length === 0) return '';
+    var sorted = days.slice().sort(function(a, b) { return a.date.localeCompare(b.date); });
+    var max = Math.max.apply(null, sorted.map(function(d) { return d.totalCost; }).concat([0.01]));
+    var pad = { top: 20, right: 16, bottom: 36, left: 48 };
+    var w = width - pad.left - pad.right;
+    var h = height - pad.top - pad.bottom;
+
+    var points = sorted.map(function(d, i) {
+      return {
+        x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w,
+        y: pad.top + h - (d.totalCost / max) * h,
+        cost: d.totalCost, msgs: d.messageCount, tokens: d.inputTokens + d.outputTokens, date: d.date
+      };
+    });
+
+    var linePath = smoothPath(points);
+    var areaPath = smoothArea(points, pad.top + h);
+
+    var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
+      var y = pad.top + h - pct * h;
+      return '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y + '" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>' +
+        '<text x="' + (pad.left - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">' + fmtCost(pct * max) + '</text>';
+    }).join('');
+
+    // Dynamic label count based on data length
+    var labelStep = Math.max(1, Math.floor(points.length / 8));
+    var xLabels = points.filter(function(_, i) { return i % labelStep === 0 || i === points.length - 1; })
+      .map(function(p) { return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + fmtDateShort(p.date) + '</text>'; }).join('');
+
+    var dots = points.map(function(p, i) {
+      return '<circle cx="' + p.x + '" cy="' + p.y + '" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="' + i + '" opacity="0.4"/>';
+    }).join('');
+
+    var pointData = JSON.stringify(points.map(function(p) {
+      return { x: +p.x.toFixed(1), y: +p.y.toFixed(1), date: fmtDate(p.date), cost: fmtCost(p.cost), msgs: p.msgs + ' messages', tokens: fmtTokens(p.tokens) + ' tokens' };
+    }));
+
+    return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points="' + pointData.replace(/"/g, '&quot;') + '" data-pad-left="' + pad.left + '" data-pad-top="' + pad.top + '" data-chart-h="' + h + '">' +
+      '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#89b4fa" stop-opacity="0.3"/><stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/></linearGradient>' +
+      '<linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#74c7ec"/><stop offset="50%" stop-color="#89b4fa"/><stop offset="100%" stop-color="#b4befe"/></linearGradient></defs>' +
+      gridLines +
+      '<path d="' + areaPath + '" fill="url(#areaGrad)" class="chart-area-fill"/>' +
+      '<path d="' + linePath + '" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>' +
+      xLabels + dots +
+      '<line id="track-line" x1="0" y1="' + pad.top + '" x2="0" y2="' + (pad.top + h) + '" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>' +
+      '<circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>' +
+      '<rect id="chart-overlay" x="' + pad.left + '" y="' + pad.top + '" width="' + w + '" height="' + h + '" fill="transparent" style="cursor:crosshair"/>' +
+      '</svg>';
+  }
+
+  // ── Build token dual-line area chart SVG ──
+  function buildTokenAreaSVG(days, width, height) {
+    var sorted = days.slice().sort(function(a, b) { return a.date.localeCompare(b.date); });
+    if (sorted.length === 0) return '';
+    var maxTokens = Math.max.apply(null, sorted.map(function(d) { return Math.max(d.inputTokens, d.outputTokens); }).concat([1]));
+    var pad = { top: 20, right: 16, bottom: 36, left: 56 };
+    var w = width - pad.left - pad.right;
+    var h = height - pad.top - pad.bottom;
+
+    var inputPts = sorted.map(function(d, i) {
+      return { x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w, y: pad.top + h - (d.inputTokens / maxTokens) * h, val: d.inputTokens, date: d.date };
+    });
+    var outputPts = sorted.map(function(d, i) {
+      return { x: pad.left + (i / Math.max(sorted.length - 1, 1)) * w, y: pad.top + h - (d.outputTokens / maxTokens) * h, val: d.outputTokens, date: d.date };
+    });
+
+    var inputLinePath = smoothPath(inputPts);
+    var outputLinePath = smoothPath(outputPts);
+    var inputAreaPath = smoothArea(inputPts, pad.top + h);
+    var outputAreaPath = smoothArea(outputPts, pad.top + h);
+
+    var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
+      var y = pad.top + h - pct * h;
+      return '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y + '" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>' +
+        '<text x="' + (pad.left - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">' + fmtTokens(pct * maxTokens) + '</text>';
+    }).join('');
+
+    var labelStep = Math.max(1, Math.floor(inputPts.length / 8));
+    var xLabels = inputPts.filter(function(_, i) { return i % labelStep === 0 || i === inputPts.length - 1; })
+      .map(function(p) { return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + fmtDateShort(p.date) + '</text>'; }).join('');
+
+    var pointData = JSON.stringify(sorted.map(function(d, i) {
+      return { x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1), date: fmtDate(d.date), cost: 'Input: ' + fmtTokens(d.inputTokens), msgs: 'Output: ' + fmtTokens(d.outputTokens), tokens: 'Total: ' + fmtTokens(d.inputTokens + d.outputTokens) };
+    }));
+
+    var inputDots = inputPts.map(function(p, i) {
+      return '<circle cx="' + p.x + '" cy="' + p.y + '" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="' + i + '" opacity="0.4"/>';
+    }).join('');
+
+    return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points="' + pointData.replace(/"/g, '&quot;') + '" data-pad-left="' + pad.left + '" data-pad-top="' + pad.top + '" data-chart-h="' + h + '">' +
+      '<defs><linearGradient id="inputAreaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#89b4fa" stop-opacity="0.25"/><stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/></linearGradient>' +
+      '<linearGradient id="outputAreaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.2"/><stop offset="100%" stop-color="#a6e3a1" stop-opacity="0.02"/></linearGradient></defs>' +
+      gridLines +
+      '<path d="' + outputAreaPath + '" fill="url(#outputAreaGrad)" class="chart-area-fill"/>' +
+      '<path d="' + outputLinePath + '" fill="none" stroke="#a6e3a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" class="chart-line"/>' +
+      '<path d="' + inputAreaPath + '" fill="url(#inputAreaGrad)" class="chart-area-fill"/>' +
+      '<path d="' + inputLinePath + '" fill="none" stroke="#89b4fa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>' +
+      xLabels + inputDots +
+      '<line id="track-line" x1="0" y1="' + pad.top + '" x2="0" y2="' + (pad.top + h) + '" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>' +
+      '<circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>' +
+      '<rect id="chart-overlay" x="' + pad.left + '" y="' + pad.top + '" width="' + w + '" height="' + h + '" fill="transparent" style="cursor:crosshair"/>' +
+      '</svg>';
+  }
+
+  // ── Build donut chart SVG ──
+  function buildDonutSVG(models, size) {
+    var sorted = Object.keys(models).sort(function(a, b) { return models[b].cost - models[a].cost; });
+    if (sorted.length === 0) return '';
+    var total = sorted.reduce(function(s, k) { return s + models[k].cost; }, 0);
+    if (total === 0) return '';
+    var colors = ['#89b4fa','#a6e3a1','#fab387','#f38ba8','#f9e2af','#cba6f7','#94e2d5'];
+    var cx = size/2, cy = size/2, r = size/2 - 8, inner = r * 0.62;
+    var cumAngle = -Math.PI / 2;
+
+    var arcs = sorted.map(function(name, i) {
+      var data = models[name];
+      var pct = data.cost / total;
+      var angle = pct * Math.PI * 2;
+      var startAngle = cumAngle;
+      cumAngle += angle;
+      var endAngle = cumAngle;
+      var largeArc = angle > Math.PI ? 1 : 0;
+      var x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+      var x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+      var ix1 = cx + inner * Math.cos(endAngle), iy1 = cy + inner * Math.sin(endAngle);
+      var ix2 = cx + inner * Math.cos(startAngle), iy2 = cy + inner * Math.sin(startAngle);
+      var color = colors[i % colors.length];
+      return '<path d="M' + x1 + ',' + y1 + ' A' + r + ',' + r + ' 0 ' + largeArc + ',1 ' + x2 + ',' + y2 + ' L' + ix1 + ',' + iy1 + ' A' + inner + ',' + inner + ' 0 ' + largeArc + ',0 ' + ix2 + ',' + iy2 + ' Z" fill="' + color + '" opacity="0.85" class="donut-segment" data-tip-date="' + fmtModel(name) + '" data-tip-cost="' + fmtCost(data.cost) + '" data-tip-msgs="' + data.messages + ' messages" data-tip-tokens="' + (pct * 100).toFixed(1) + '% of total"/>';
+    }).join('');
+
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '" class="chart-svg">' +
+      arcs +
+      '<text x="' + cx + '" y="' + (cy - 6) + '" text-anchor="middle" fill="#cdd6f4" font-size="16" font-weight="700">' + fmtCost(total) + '</text>' +
+      '<text x="' + cx + '" y="' + (cy + 12) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">TOTAL</text></svg>';
+  }
+
+  // ── Build hourly area chart for 1D view ──
+  function buildHourlyAreaSVG(dayStats, width, height, mode) {
+    var hourly = dayStats.hourlyActivity || new Array(24).fill(0);
+    var totalMsgs = hourly.reduce(function(s, v) { return s + v; }, 0) || 1;
+
+    // Distribute today's cost/tokens proportionally by hourly messages
+    var hourlyData = hourly.map(function(msgs, h) {
+      var ratio = msgs / totalMsgs;
+      return {
+        hour: h,
+        msgs: msgs,
+        cost: dayStats.totalCost * ratio,
+        input: dayStats.inputTokens * ratio,
+        output: dayStats.outputTokens * ratio
+      };
+    });
+
+    var pad = { top: 20, right: 16, bottom: 36, left: mode === 'tokens' ? 56 : 48 };
+    var w = width - pad.left - pad.right;
+    var h = height - pad.top - pad.bottom;
+
+    if (mode === 'tokens') {
+      // Dual-line: input + output
+      var maxVal = Math.max.apply(null, hourlyData.map(function(d) { return Math.max(d.input, d.output); }).concat([1]));
+      var inputPts = hourlyData.map(function(d, i) {
+        return { x: pad.left + (i / 23) * w, y: pad.top + h - (d.input / maxVal) * h };
+      });
+      var outputPts = hourlyData.map(function(d, i) {
+        return { x: pad.left + (i / 23) * w, y: pad.top + h - (d.output / maxVal) * h };
+      });
+      var inputLinePath = smoothPath(inputPts);
+      var outputLinePath = smoothPath(outputPts);
+      var inputAreaPath = smoothArea(inputPts, pad.top + h);
+      var outputAreaPath = smoothArea(outputPts, pad.top + h);
+
+      var gridLines = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
+        var y = pad.top + h - pct * h;
+        return '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y + '" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>' +
+          '<text x="' + (pad.left - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">' + fmtTokens(pct * maxVal) + '</text>';
+      }).join('');
+
+      var xLabels = inputPts.filter(function(_, i) { return i % 3 === 0; })
+        .map(function(p, _, arr) { var idx = inputPts.indexOf(p); return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + String(idx).padStart(2, '0') + ':00</text>'; }).join('');
+
+      var pointData = JSON.stringify(hourlyData.map(function(d, i) {
+        return { x: +inputPts[i].x.toFixed(1), y: +inputPts[i].y.toFixed(1), date: String(d.hour).padStart(2, '0') + ':00 - ' + String(d.hour).padStart(2, '0') + ':59', cost: 'Input: ' + fmtTokens(d.input), msgs: 'Output: ' + fmtTokens(d.output), tokens: d.msgs + ' messages' };
+      }));
+
+      var dots = inputPts.map(function(p, i) {
+        return '<circle cx="' + p.x + '" cy="' + p.y + '" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="' + i + '" opacity="0.4"/>';
+      }).join('');
+
+      return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points="' + pointData.replace(/"/g, '&quot;') + '" data-pad-left="' + pad.left + '" data-pad-top="' + pad.top + '" data-chart-h="' + h + '">' +
+        '<defs><linearGradient id="inputAreaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#89b4fa" stop-opacity="0.25"/><stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/></linearGradient>' +
+        '<linearGradient id="outputAreaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.2"/><stop offset="100%" stop-color="#a6e3a1" stop-opacity="0.02"/></linearGradient></defs>' +
+        gridLines +
+        '<path d="' + outputAreaPath + '" fill="url(#outputAreaGrad)" class="chart-area-fill"/>' +
+        '<path d="' + outputLinePath + '" fill="none" stroke="#a6e3a1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" class="chart-line"/>' +
+        '<path d="' + inputAreaPath + '" fill="url(#inputAreaGrad)" class="chart-area-fill"/>' +
+        '<path d="' + inputLinePath + '" fill="none" stroke="#89b4fa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>' +
+        xLabels + dots +
+        '<line id="track-line" x1="0" y1="' + pad.top + '" x2="0" y2="' + (pad.top + h) + '" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>' +
+        '<circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>' +
+        '<rect id="chart-overlay" x="' + pad.left + '" y="' + pad.top + '" width="' + w + '" height="' + h + '" fill="transparent" style="cursor:crosshair"/>' +
+        '</svg>';
+    } else {
+      // Cost mode - single line
+      var maxCost = Math.max.apply(null, hourlyData.map(function(d) { return d.cost; }).concat([0.01]));
+      var pts = hourlyData.map(function(d, i) {
+        return { x: pad.left + (i / 23) * w, y: pad.top + h - (d.cost / maxCost) * h, cost: d.cost, msgs: d.msgs, hour: d.hour };
+      });
+      var linePath = smoothPath(pts);
+      var areaPathD = smoothArea(pts, pad.top + h);
+
+      var gridLines2 = [0, 0.25, 0.5, 0.75, 1].map(function(pct) {
+        var y = pad.top + h - pct * h;
+        return '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y + '" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>' +
+          '<text x="' + (pad.left - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">' + fmtCost(pct * maxCost) + '</text>';
+      }).join('');
+
+      var xLabels2 = pts.filter(function(_, i) { return i % 3 === 0; })
+        .map(function(p) { return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + String(p.hour).padStart(2, '0') + ':00</text>'; }).join('');
+
+      var pointData2 = JSON.stringify(pts.map(function(p) {
+        return { x: +p.x.toFixed(1), y: +p.y.toFixed(1), date: String(p.hour).padStart(2, '0') + ':00 - ' + String(p.hour).padStart(2, '0') + ':59', cost: fmtCost(p.cost), msgs: p.msgs + ' messages', tokens: '' };
+      }));
+
+      var dots2 = pts.map(function(p, i) {
+        return '<circle cx="' + p.x + '" cy="' + p.y + '" r="3" fill="#89b4fa" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" data-idx="' + i + '" opacity="0.4"/>';
+      }).join('');
+
+      return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg" id="cost-chart" data-points="' + pointData2.replace(/"/g, '&quot;') + '" data-pad-left="' + pad.left + '" data-pad-top="' + pad.top + '" data-chart-h="' + h + '">' +
+        '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#89b4fa" stop-opacity="0.3"/><stop offset="100%" stop-color="#89b4fa" stop-opacity="0.02"/></linearGradient>' +
+        '<linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#74c7ec"/><stop offset="50%" stop-color="#89b4fa"/><stop offset="100%" stop-color="#b4befe"/></linearGradient></defs>' +
+        gridLines2 +
+        '<path d="' + areaPathD + '" fill="url(#areaGrad)" class="chart-area-fill"/>' +
+        '<path d="' + linePath + '" fill="none" stroke="url(#lineGrad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>' +
+        xLabels2 + dots2 +
+        '<line id="track-line" x1="0" y1="' + pad.top + '" x2="0" y2="' + (pad.top + h) + '" stroke="rgba(137,180,250,0.3)" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>' +
+        '<circle id="track-dot" cx="0" cy="0" r="6" fill="#89b4fa" stroke="#fff" stroke-width="2" visibility="hidden" style="filter:drop-shadow(0 0 6px rgba(137,180,250,0.5))"/>' +
+        '<rect id="chart-overlay" x="' + pad.left + '" y="' + pad.top + '" width="' + w + '" height="' + h + '" fill="transparent" style="cursor:crosshair"/>' +
+        '</svg>';
+    }
+  }
+
+  // ── Period label helpers ──
+  var periodLabels = { 1: 'Today', 7: 'Last 7 Days', 30: 'Last 30 Days', 365: 'Last Year', 0: 'All Time' };
+  var chartMode = 'cost'; // 'cost' or 'tokens'
+
+  // ── Render chart based on current mode ──
+  function renderChart(sorted, agg) {
+    var chartArea = document.getElementById('chart-area');
+    var subtitle = document.getElementById('chart-subtitle');
+    var summaryEl = document.querySelector('.period-summary');
+    var metaEl = document.getElementById('period-meta');
+    if (!chartArea) return;
+
+    chartArea.classList.add('transitioning');
+    setTimeout(function() {
+      if (currentPeriod === 1) {
+        // 1D: hourly chart using today's data
+        var todayData = ALL_STATS.find(function(s) { return s.date === todayKey; }) || { date: todayKey, totalCost: 0, inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, messageCount: 0, modelBreakdown: {}, toolUsage: {}, hourlyActivity: new Array(24).fill(0), sessionCount: 0, projectBreakdown: {} };
+        chartArea.innerHTML = buildHourlyAreaSVG(todayData, 700, 220, chartMode);
+        if (subtitle) subtitle.style.display = chartMode === 'tokens' ? 'flex' : 'none';
+        if (summaryEl) summaryEl.style.display = chartMode === 'cost' ? '' : 'none';
+        if (metaEl) metaEl.style.display = chartMode === 'cost' ? '' : 'none';
+      } else if (chartMode === 'cost') {
+        chartArea.innerHTML = buildAreaChartSVG(sorted, 700, 220);
+        if (subtitle) subtitle.style.display = 'none';
+        if (summaryEl) summaryEl.style.display = '';
+        if (metaEl) metaEl.style.display = '';
+      } else {
+        chartArea.innerHTML = buildTokenAreaSVG(sorted, 700, 220);
+        if (subtitle) subtitle.style.display = 'flex';
+        if (summaryEl) summaryEl.style.display = 'none';
+        if (metaEl) metaEl.style.display = 'none';
       }
+      chartArea.classList.remove('transitioning');
+      attachChartListeners();
+    }, 150);
+  }
 
-      if (nearest === activeIdx) return; // no change
-      activeIdx = nearest;
-      const p = chartPoints[nearest];
+  // ── Update everything for a period ──
+  function switchPeriod(period) {
+    currentPeriod = period;
+    var filtered = filterByPeriod(period);
+    var sorted = filtered.slice().sort(function(a, b) { return a.date.localeCompare(b.date); });
+    var agg = computeFiltered(filtered);
 
-      // Update tracking line + dot
-      trackLine.setAttribute('x1', p.x);
-      trackLine.setAttribute('x2', p.x);
-      trackLine.setAttribute('visibility', 'visible');
-      trackDot.setAttribute('cx', p.x);
-      trackDot.setAttribute('cy', p.y);
-      trackDot.setAttribute('visibility', 'visible');
-
-      // Dim all dots, highlight active
-      chart.querySelectorAll('.data-dot').forEach(function(dot, i) {
-        dot.setAttribute('opacity', i === nearest ? '1' : '0.25');
-        dot.setAttribute('r', i === nearest ? '0' : '3'); // hide under track-dot
-      });
-
-      // Update tooltip content
-      tipTitle.textContent = p.date;
-      tipRows.innerHTML = '';
-      addRow('Cost', p.cost);
-      addRow('Messages', p.msgs);
-      addRow('Tokens', p.tokens);
-
-      // Position tooltip near the data point (in screen coords)
-      const dotScreenPt = svg.createSVGPoint();
-      dotScreenPt.x = p.x;
-      dotScreenPt.y = p.y;
-      const screenPos = dotScreenPt.matrixTransform(svg.getScreenCTM());
-
-      const vw = window.innerWidth;
-      let tx = screenPos.x + 16;
-      let ty = screenPos.y - 40;
-      if (tx + 180 > vw) tx = screenPos.x - 196;
-      if (ty < 8) ty = 8;
-
-      tooltip.style.left = tx + 'px';
-      tooltip.style.top = ty + 'px';
-      tooltip.classList.add('visible');
+    // Update active tab
+    document.querySelectorAll('.period-tab').forEach(function(tab) {
+      tab.classList.toggle('active', parseInt(tab.getAttribute('data-period')) === period);
     });
 
-    overlay.addEventListener('mouseleave', function() {
-      activeIdx = -1;
-      trackLine.setAttribute('visibility', 'hidden');
-      trackDot.setAttribute('visibility', 'hidden');
-      chart.querySelectorAll('.data-dot').forEach(function(dot) {
-        dot.setAttribute('opacity', '0.4');
-        dot.setAttribute('r', '3');
-      });
-      tooltip.classList.remove('visible');
+    // Update header
+    var headerLabel = document.getElementById('header-period-label');
+    if (headerLabel) headerLabel.textContent = periodLabels[period] || ('Last ' + period + ' days');
+
+    // Update period summary (cost mode)
+    var totalEl = document.getElementById('period-total');
+    if (totalEl) totalEl.textContent = fmtCost(agg.totalCost);
+
+    var changeEl = document.getElementById('period-change');
+    if (changeEl) {
+      var today = filtered.find(function(s) { return s.date === todayKey; });
+      var yd = new Date(); yd.setDate(yd.getDate() - 1);
+      var yesterdayKey = yd.toISOString().slice(0, 10);
+      var yesterday = filtered.find(function(s) { return s.date === yesterdayKey; });
+      var todayCost = today ? today.totalCost : 0;
+      var yesterdayCost = yesterday ? yesterday.totalCost : 0;
+      var costChange = yesterdayCost > 0 ? ((todayCost - yesterdayCost) / yesterdayCost) * 100 : 0;
+      var changeIcon = costChange > 0 ? '\u25B2' : costChange < 0 ? '\u25BC' : '\u2022';
+      var changeColor = costChange > 0 ? '#f38ba8' : costChange < 0 ? '#a6e3a1' : 'rgba(255,255,255,0.4)';
+      var changeText = costChange !== 0 ? Math.abs(costChange).toFixed(0) + '% vs yesterday' : 'same as yesterday';
+      changeEl.style.color = changeColor;
+      changeEl.textContent = changeIcon + ' ' + changeText;
+    }
+
+    var metaEl = document.getElementById('period-meta');
+    if (metaEl) {
+      if (period === 1) {
+        metaEl.textContent = 'Hourly breakdown \u00B7 ' + agg.totalMsgs + ' messages \u00B7 ' + fmtTokens(agg.totalInput + agg.totalOutput) + ' tokens';
+      } else {
+        metaEl.textContent = filtered.length + ' days \u00B7 avg ' + fmtCost(agg.avgDailyCost) + '/day \u00B7 peak ' + fmtCost(agg.peakDay.totalCost) + ' on ' + fmtDate(agg.peakDay.date);
+      }
+    }
+
+    // Update token subtitle stats
+    var tokenBadge = document.getElementById('token-badge');
+    if (tokenBadge) tokenBadge.textContent = fmtTokens(agg.totalInput + agg.totalOutput + agg.totalCacheWrite + agg.totalCacheRead) + ' TOTAL';
+    var tokenInputLabel = document.getElementById('token-input-label');
+    if (tokenInputLabel) tokenInputLabel.textContent = fmtTokens(agg.totalInput);
+    var tokenOutputLabel = document.getElementById('token-output-label');
+    if (tokenOutputLabel) tokenOutputLabel.textContent = fmtTokens(agg.totalOutput);
+
+    // Render chart based on current mode
+    renderChart(sorted, agg);
+
+    // Update model distribution
+    var modelBadge = document.getElementById('model-badge');
+    if (modelBadge) modelBadge.textContent = fmtCost(agg.totalCost);
+    var modelDonutArea = document.getElementById('model-donut-area');
+    if (modelDonutArea) {
+      var colors = ['#89b4fa','#a6e3a1','#fab387','#f38ba8','#f9e2af','#cba6f7','#94e2d5'];
+      var sortedModels = Object.keys(agg.modelTotals).sort(function(a, b) { return agg.modelTotals[b].cost - agg.modelTotals[a].cost; });
+      var legendHtml = sortedModels.map(function(name, i) {
+        var data = agg.modelTotals[name];
+        var color = colors[i % colors.length];
+        var pct = agg.totalCost > 0 ? ((data.cost / agg.totalCost) * 100).toFixed(0) : '0';
+        return '<div class="legend-item"><span class="legend-dot" style="background:' + color + '"></span><span class="legend-name">' + fmtModel(name) + '</span><span class="legend-val">' + fmtCost(data.cost) + '</span><span class="legend-pct">' + pct + '%</span></div>';
+      }).join('');
+      modelDonutArea.innerHTML = buildDonutSVG(agg.modelTotals, 140) + '<div class="legend">' + legendHtml + '</div>';
+    }
+
+    // Update cache stats
+    var cacheReads = document.getElementById('cache-reads');
+    if (cacheReads) cacheReads.textContent = fmtTokens(agg.totalCacheRead);
+    var cacheWrites = document.getElementById('cache-writes');
+    if (cacheWrites) cacheWrites.textContent = fmtTokens(agg.totalCacheWrite);
+    var cacheHitRate = document.getElementById('cache-hit-rate');
+    if (cacheHitRate) cacheHitRate.textContent = (agg.totalCacheRead + agg.totalInput) > 0 ? ((agg.totalCacheRead / (agg.totalCacheRead + agg.totalInput)) * 100).toFixed(0) + '%' : '0%';
+    var cacheSavings = document.getElementById('cache-savings');
+    if (cacheSavings) cacheSavings.textContent = '~' + fmtCost(agg.cacheSavings);
+
+    // Update daily table
+    var tbody = document.getElementById('daily-tbody');
+    if (tbody) {
+      var peakCost = agg.peakDay.totalCost || 1;
+      tbody.innerHTML = filtered.map(function(day) {
+        var isToday = day.date === todayKey;
+        return '<tr class="' + (isToday ? 'row-today' : '') + '">' +
+          '<td class="cell-date">' + fmtDate(day.date) + (isToday ? '<span class="badge-today">TODAY</span>' : '') + '</td>' +
+          '<td class="cell-cost">' + fmtCost(day.totalCost) + '</td>' +
+          '<td class="cell-tokens">' + fmtTokens(day.inputTokens + day.outputTokens) + '</td>' +
+          '<td class="cell-msgs">' + day.messageCount + '</td>' +
+          '<td class="cell-bar"><div class="mini-bar"><div class="mini-bar-fill" style="width:' + (peakCost > 0 ? (day.totalCost / peakCost * 100) : 0) + '%"></div></div></td></tr>';
+      }).join('');
+    }
+    var peakBadge = document.getElementById('daily-peak-badge');
+    if (peakBadge) peakBadge.textContent = 'PEAK: ' + fmtDate(agg.peakDay.date) + ' at ' + fmtCost(agg.peakDay.totalCost);
+  }
+
+  // ── Animate SVG line lengths ──
+  function initChartAnimations() {
+    // Animate line drawing
+    document.querySelectorAll('.chart-line').forEach(function(line) {
+      var len = line.getTotalLength ? line.getTotalLength() : 0;
+      if (len > 0) {
+        line.style.setProperty('--line-length', len + 'px');
+        line.style.animation = 'none';
+        line.offsetHeight; // force reflow
+        line.style.animation = '';
+      }
+    });
+    // Animate area fill
+    document.querySelectorAll('.chart-area-fill').forEach(function(area) {
+      area.style.animation = 'none';
+      area.offsetHeight;
+      area.style.animation = '';
+    });
+    // Stagger dot animations
+    document.querySelectorAll('.data-dot').forEach(function(dot, i) {
+      dot.style.animation = 'none';
+      dot.offsetHeight;
+      dot.style.animation = 'dotPopIn 0.3s ease-out both';
+      dot.style.animationDelay = (0.5 + i * 0.04) + 's';
     });
   }
 
-  // ── Generic tooltip for other charts (donut, token bars) ──
+  // ── Chart tooltip interaction ──
+  function attachChartListeners() {
+    initChartAnimations();
+    var chart = document.getElementById('cost-chart');
+    var trackLine = document.getElementById('track-line');
+    var trackDot = document.getElementById('track-dot');
+    var overlay = document.getElementById('chart-overlay');
+
+    var chartPoints = [];
+    if (chart) {
+      try { chartPoints = JSON.parse(chart.getAttribute('data-points') || '[]'); } catch(e) {}
+    }
+
+    var activeIdx = -1;
+
+    if (overlay && chartPoints.length > 0) {
+      overlay.addEventListener('mousemove', function(e) {
+        var svg = chart;
+        var pt = svg.createSVGPoint();
+        pt.x = e.clientX;
+        pt.y = e.clientY;
+        var svgPt = pt.matrixTransform(svg.getScreenCTM().inverse());
+
+        var minDist = Infinity, nearest = 0;
+        for (var i = 0; i < chartPoints.length; i++) {
+          var dist = Math.abs(chartPoints[i].x - svgPt.x);
+          if (dist < minDist) { minDist = dist; nearest = i; }
+        }
+
+        if (nearest === activeIdx) return;
+        activeIdx = nearest;
+        var p = chartPoints[nearest];
+
+        trackLine.setAttribute('x1', p.x);
+        trackLine.setAttribute('x2', p.x);
+        trackLine.setAttribute('visibility', 'visible');
+        trackDot.setAttribute('cx', p.x);
+        trackDot.setAttribute('cy', p.y);
+        trackDot.setAttribute('visibility', 'visible');
+
+        chart.querySelectorAll('.data-dot').forEach(function(dot, i) {
+          dot.setAttribute('opacity', i === nearest ? '1' : '0.25');
+          dot.setAttribute('r', i === nearest ? '0' : '3');
+        });
+
+        tipTitle.textContent = p.date;
+        tipRows.innerHTML = '';
+        addRow('Cost', p.cost);
+        addRow('Messages', p.msgs);
+        addRow('Tokens', p.tokens);
+
+        var dotScreenPt = svg.createSVGPoint();
+        dotScreenPt.x = p.x;
+        dotScreenPt.y = p.y;
+        var screenPos = dotScreenPt.matrixTransform(svg.getScreenCTM());
+
+        var vw = window.innerWidth;
+        var tx = screenPos.x + 16;
+        var ty = screenPos.y - 40;
+        if (tx + 180 > vw) tx = screenPos.x - 196;
+        if (ty < 8) ty = 8;
+
+        tooltip.style.left = tx + 'px';
+        tooltip.style.top = ty + 'px';
+        tooltip.classList.add('visible');
+      });
+
+      overlay.addEventListener('mouseleave', function() {
+        activeIdx = -1;
+        trackLine.setAttribute('visibility', 'hidden');
+        trackDot.setAttribute('visibility', 'hidden');
+        chart.querySelectorAll('.data-dot').forEach(function(dot) {
+          dot.setAttribute('opacity', '0.4');
+          dot.setAttribute('r', '3');
+        });
+        tooltip.classList.remove('visible');
+      });
+    }
+  }
+
+  // ── Generic tooltip for other charts ──
   document.addEventListener('mousemove', function(e) {
-    // Skip if we're inside the area chart (handled above)
     if (e.target.closest('#cost-chart')) return;
-
-    const target = e.target.closest('[data-tip-date]');
+    var target = e.target.closest('[data-tip-date]');
     if (target) {
-      const date = target.getAttribute('data-tip-date');
-      const cost = target.getAttribute('data-tip-cost');
-      const msgs = target.getAttribute('data-tip-msgs');
-      const tokens = target.getAttribute('data-tip-tokens');
+      var date = target.getAttribute('data-tip-date');
+      var cost = target.getAttribute('data-tip-cost');
+      var msgs = target.getAttribute('data-tip-msgs');
+      var tokens = target.getAttribute('data-tip-tokens');
       if (!date) return;
-
       tipTitle.textContent = date;
       tipRows.innerHTML = '';
       if (cost) addRow('Cost', cost);
       if (msgs) addRow('Messages', msgs);
       if (tokens) addRow('Tokens', tokens);
-
-      const vw = window.innerWidth;
-      let x = e.clientX + 14, y = e.clientY - 10;
+      var vw = window.innerWidth;
+      var x = e.clientX + 14, y = e.clientY - 10;
       if (x + 180 > vw) x = e.clientX - 180;
       if (y < 8) y = 8;
       tooltip.style.left = x + 'px';
@@ -1679,16 +2444,48 @@ body::before {
     }
   });
 
-  function addRow(label, value) {
-    const row = document.createElement('div');
-    row.className = 'tip-row';
-    row.innerHTML = '<span class="tip-label">' + label + '</span><span class="tip-value">' + value + '</span>';
-    tipRows.appendChild(row);
-  }
-
   document.addEventListener('mouseleave', function() {
     tooltip.classList.remove('visible');
   });
+
+  // ── Period tab click handlers ──
+  document.querySelectorAll('.period-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var period = parseInt(this.getAttribute('data-period'));
+      switchPeriod(period);
+    });
+  });
+
+  // ── Chart mode toggle (Cost / Tokens) ──
+  document.querySelectorAll('.chart-mode-tab').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var mode = this.getAttribute('data-mode');
+      if (mode === chartMode) return;
+      chartMode = mode;
+      document.querySelectorAll('.chart-mode-tab').forEach(function(t) {
+        t.classList.toggle('active', t.getAttribute('data-mode') === mode);
+      });
+      var title = document.getElementById('chart-section-title');
+      if (title) title.textContent = mode === 'cost' ? 'Cost Trend' : 'Token Usage';
+      // Re-render with current period
+      switchPeriod(currentPeriod);
+    });
+  });
+
+  // ── Daily breakdown collapse toggle ──
+  var dailyToggle = document.getElementById('daily-toggle');
+  var dailyBody = document.getElementById('daily-body');
+  if (dailyToggle && dailyBody) {
+    dailyToggle.addEventListener('click', function() {
+      var expanded = dailyBody.classList.toggle('expanded');
+      dailyToggle.classList.toggle('expanded', expanded);
+      dailyToggle.setAttribute('aria-expanded', expanded.toString());
+      dailyToggle.childNodes[0].textContent = expanded ? 'Hide ' : 'Show ';
+    });
+  }
+
+  // ── Initial chart listeners ──
+  attachChartListeners();
 })();
 </script>
 </body>

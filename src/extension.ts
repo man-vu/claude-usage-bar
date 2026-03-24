@@ -51,7 +51,7 @@ export function activate(context: vscode.ExtensionContext): void {
     "claudeUsageBar.showDashboard",
     async () => {
       const [stats, creds] = await Promise.all([
-        scanConversations(7, 0),
+        scanConversations(365, 0),
         getCredentials(),
       ]);
       lastDailyStats = stats;
