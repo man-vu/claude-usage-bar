@@ -240,6 +240,7 @@ function stopTimer(): void {
 
 async function refreshAll(): Promise<void> {
   await Promise.all([refreshApiUsage(), refreshLocalStats()]);
+  updateDashboardIfOpen();
 }
 
 async function refreshApiUsage(): Promise<void> {
@@ -365,6 +366,23 @@ function rebuildSharedTooltip(): void {
   statusBar.setTooltip(md);
 }
 
+/**
+ * Push fresh data to the dashboard webview if it's currently open.
+ */
+async function updateDashboardIfOpen(): Promise<void> {
+  if (!DashboardPanel.isOpen) return;
+  const [stats, creds] = await Promise.all([
+    scanConversations(365, 0),
+    getCredentials(),
+  ]);
+  const sub: SubscriptionInfo = {
+    type: creds?.subscriptionType ?? "unknown",
+    tier: creds?.rateLimitTier ?? "unknown",
+  };
+  DashboardPanel.updateIfOpen(stats, sub, lastData ?? undefined, lastSuccessfulFetch);
+  log("Dashboard auto-refreshed");
+}
+
 // ── Color helpers ──
 const C = {
   green: "#4ec9b0",
@@ -460,7 +478,11 @@ function buildUnifiedTooltip(
     }
 
     const intervalMin = Math.round(getAdaptiveIntervalMs() / 60_000);
-    lines.push("", `$(history) _Updated ${ageStr}_ \u2003 $(sync) _Auto-refreshes every ${intervalMin}m_ \u2003 $(refresh) _Ctrl+Alt+R_`, "");
+    lines.push(
+      "",
+      `$(history) _Updated ${ageStr}_ &nbsp;&middot;&nbsp; $(sync) _every ${intervalMin}m_ &nbsp;&middot;&nbsp; $(refresh) _Ctrl+Alt+R_`,
+      "",
+    );
   }
 
   // ══════════════════════════════════════════════

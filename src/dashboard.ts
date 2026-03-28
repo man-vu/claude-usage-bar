@@ -52,6 +52,17 @@ export class DashboardPanel {
     this.panel.webview.html = buildHtml(stats, sub, usage, lastFetchTime);
   }
 
+  /** Update the open dashboard if it exists, without revealing it. */
+  static updateIfOpen(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): void {
+    if (DashboardPanel.instance) {
+      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
+    }
+  }
+
+  static get isOpen(): boolean {
+    return DashboardPanel.instance !== undefined;
+  }
+
   private dispose(): void {
     DashboardPanel.instance = undefined;
     this.panel.dispose();
