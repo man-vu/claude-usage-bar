@@ -1,36 +1,94 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { getCredentials } from "./credentials";
 import { fetchUsage, UsageData } from "./api";
 import { StatusBarManager } from "./statusBar";
 import { scanConversations, scanToday, DailyStats } from "./scanner";
 import { DashboardPanel, SubscriptionInfo } from "./dashboard";
+
 let statusBar: StatusBarManager;
-let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let lastData: UsageData | null = null;
 let lastLocalStats: DailyStats | null = null;
-let lastDailyStats: DailyStats[] = [];
 let isVisible = true;
-let rateLimitBackoff = 60; // seconds, grows exponentially
+let consecutiveFailures = 0;
 let extensionContext: vscode.ExtensionContext;
+let lastSuccessfulFetch: number | null = null;
+let lastAttemptTime = 0;
+let outputChannel: vscode.OutputChannel;
+let statusLineWatcher: fs.FSWatcher | undefined;
 
 const CACHE_KEY = "claudeUsageBar.lastData";
 const CACHE_TIME_KEY = "claudeUsageBar.lastDataTime";
+const STATUS_LINE_FILE = path.join(os.homedir(), ".claude", "usage-bar-status.json");
+
+// Minimum gap between API calls (prevents multiple sources triggering concurrent calls)
+const MIN_API_GAP_MS = 30_000;
+
+function log(msg: string): void {
+  const ts = new Date().toLocaleTimeString();
+  outputChannel.appendLine(`[${ts}] ${msg}`);
+}
+
+/**
+ * Adaptive timer interval: starts at user config (default 5min),
+ * doubles on each failure up to 30min, resets on success.
+ */
+function getAdaptiveIntervalMs(): number {
+  const config = vscode.workspace.getConfiguration("claudeUsageBar");
+  const baseSeconds = config.get<number>("refreshInterval", 300);
+  const baseMs = Math.max(baseSeconds, 60) * 1000;
+
+  if (consecutiveFailures === 0) return baseMs;
+
+  // Double the interval for each failure, cap at 30 minutes
+  const multiplier = Math.min(Math.pow(2, consecutiveFailures), 6);
+  const adaptedMs = Math.min(baseMs * multiplier, 30 * 60 * 1000);
+  return adaptedMs;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionContext = context;
+  outputChannel = vscode.window.createOutputChannel("Claude Usage Bar");
   statusBar = new StatusBarManager();
+
+  log("Extension activating...");
+
+  // Honor showInStatusBar config on startup
+  const config = vscode.workspace.getConfiguration("claudeUsageBar");
+  const showInStatusBar = config.get<boolean>("showInStatusBar", true);
+  if (!showInStatusBar) {
+    isVisible = false;
+    statusBar.hide();
+  }
 
   // Restore cached API data from previous session
   const cached = context.globalState.get<UsageData>(CACHE_KEY);
+  const cachedTime = context.globalState.get<number>(CACHE_TIME_KEY);
   if (cached) {
     lastData = cached;
+    lastSuccessfulFetch = cachedTime ?? null;
     statusBar.update(cached, true);
+    const age = cachedTime ? Math.round((Date.now() - cachedTime) / 1000) : "unknown";
+    log(`Restored cached data (age: ${age}s)`);
   }
+
+  // Try reading statusLine file for supplementary data
+  readStatusLineFile();
+  watchStatusLineFile();
 
   // Register commands
   const refreshCmd = vscode.commands.registerCommand(
     "claudeUsageBar.refresh",
-    () => refreshAll()
+    () => {
+      log("Manual refresh triggered — resetting failure counter");
+      consecutiveFailures = 0;
+      lastAttemptTime = 0; // Allow immediate retry
+      scheduleNextTick(0); // Run now
+      return Promise.resolve();
+    }
   );
 
   const toggleCmd = vscode.commands.registerCommand(
@@ -39,7 +97,9 @@ export function activate(context: vscode.ExtensionContext): void {
       isVisible = !isVisible;
       if (isVisible) {
         statusBar.show();
-        refreshAll();
+        consecutiveFailures = 0;
+        lastAttemptTime = 0;
+        scheduleNextTick(0);
       } else {
         statusBar.hide();
         stopTimer();
@@ -54,12 +114,54 @@ export function activate(context: vscode.ExtensionContext): void {
         scanConversations(365, 0),
         getCredentials(),
       ]);
-      lastDailyStats = stats;
+
+      // Only try a fresh fetch if we haven't failed recently
+      let usageData = lastData;
+      const timeSinceLastAttempt = Date.now() - lastAttemptTime;
+      if (creds?.accessToken && consecutiveFailures < 2 && timeSinceLastAttempt > MIN_API_GAP_MS) {
+        log("Dashboard open: fetching fresh usage data...");
+        const result = await fetchUsage(creds.accessToken);
+        lastAttemptTime = Date.now();
+        if (result.data) {
+          lastData = result.data;
+          usageData = result.data;
+          lastSuccessfulFetch = Date.now();
+          consecutiveFailures = 0;
+          statusBar.update(result.data, false);
+          extensionContext.globalState.update(CACHE_KEY, result.data);
+          extensionContext.globalState.update(CACHE_TIME_KEY, Date.now());
+          rebuildSharedTooltip();
+          log("Dashboard: fresh data obtained");
+        } else {
+          consecutiveFailures++;
+          log(`Dashboard: API returned ${result.error}, using cached data (age: ${formatAge(lastSuccessfulFetch)})`);
+        }
+      } else {
+        log(`Dashboard: using cached data (failures: ${consecutiveFailures}, last attempt: ${formatAge(lastAttemptTime || null)})`);
+      }
+
       const sub: SubscriptionInfo = {
         type: creds?.subscriptionType ?? "unknown",
         tier: creds?.rateLimitTier ?? "unknown",
       };
-      DashboardPanel.show(context, stats, sub);
+      DashboardPanel.show(context, stats, sub, usageData ?? undefined, lastSuccessfulFetch);
+    }
+  );
+
+  // Dashboard refresh: re-scans JSONL only, no API call (avoids rate limit)
+  const refreshDashboardCmd = vscode.commands.registerCommand(
+    "claudeUsageBar.refreshDashboard",
+    async () => {
+      log("Dashboard refresh: re-scanning local data (no API call)");
+      const [stats, creds] = await Promise.all([
+        scanConversations(365, 0),
+        getCredentials(),
+      ]);
+      const sub: SubscriptionInfo = {
+        type: creds?.subscriptionType ?? "unknown",
+        tier: creds?.rateLimitTier ?? "unknown",
+      };
+      DashboardPanel.show(context, stats, sub, lastData ?? undefined, lastSuccessfulFetch);
     }
   );
 
@@ -69,15 +171,26 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    refreshCmd, toggleCmd, dashboardCmd, scanCmd,
-    statusBar
+    refreshCmd, toggleCmd, dashboardCmd, refreshDashboardCmd, scanCmd,
+    statusBar, outputChannel
   );
 
   // Listen for config changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("claudeUsageBar")) {
-        restartTimer();
+        const cfg = vscode.workspace.getConfiguration("claudeUsageBar");
+        const shouldShow = cfg.get<boolean>("showInStatusBar", true);
+        if (shouldShow && !isVisible) {
+          isVisible = true;
+          statusBar.show();
+          consecutiveFailures = 0;
+          scheduleNextTick(0);
+        } else if (!shouldShow && isVisible) {
+          isVisible = false;
+          statusBar.hide();
+          stopTimer();
+        }
         if (lastData) {
           statusBar.update(lastData);
         }
@@ -85,56 +198,93 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // Initial fetch
-  refreshAll();
-  startTimer();
+  // Initial fetch + start adaptive timer
+  refreshAll().then(() => scheduleNextTick());
+  log("Extension activated");
 }
 
 export function deactivate(): void {
   stopTimer();
+  if (statusLineWatcher) {
+    statusLineWatcher.close();
+    statusLineWatcher = undefined;
+  }
+}
+
+/**
+ * Schedule the next refresh tick using adaptive interval.
+ * Uses setTimeout instead of setInterval so the interval can change dynamically.
+ */
+function scheduleNextTick(overrideMs?: number): void {
+  stopTimer();
+  if (!isVisible) return;
+
+  const ms = overrideMs ?? getAdaptiveIntervalMs();
+  if (overrideMs === undefined) {
+    log(`Next refresh in ${Math.round(ms / 1000)}s (failures: ${consecutiveFailures})`);
+  }
+  refreshTimer = setTimeout(async () => {
+    if (isVisible) {
+      await refreshAll();
+      scheduleNextTick();
+    }
+  }, ms);
+}
+
+function stopTimer(): void {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+  }
 }
 
 async function refreshAll(): Promise<void> {
-  refreshApiUsage();
-  refreshLocalStats();
+  await Promise.all([refreshApiUsage(), refreshLocalStats()]);
 }
 
 async function refreshApiUsage(): Promise<void> {
+  // Enforce minimum gap between API calls
+  const timeSinceLastAttempt = Date.now() - lastAttemptTime;
+  if (timeSinceLastAttempt < MIN_API_GAP_MS) {
+    log(`Skipping API call (only ${Math.round(timeSinceLastAttempt / 1000)}s since last attempt)`);
+    return;
+  }
+
   if (!lastData) {
     statusBar.setLoading();
   }
 
   const creds = await getCredentials();
   if (!creds) {
+    log("No credentials found");
     statusBar.setNoCredentials();
     return;
   }
 
   if (creds.expiresAt && Date.now() > creds.expiresAt) {
+    log(`Token expired at ${new Date(creds.expiresAt).toISOString()}`);
     statusBar.setError("Token expired — re-authenticate in Claude Code");
     return;
   }
 
+  log("Fetching usage data...");
+  lastAttemptTime = Date.now();
   const result = await fetchUsage(creds.accessToken);
 
   if (result.error === "rate_limited") {
+    consecutiveFailures++;
+    const nextInterval = Math.round(getAdaptiveIntervalMs() / 1000);
+    log(`Rate limited (attempt #${consecutiveFailures}) — next attempt in ~${nextInterval}s`);
     if (lastData) {
       statusBar.update(lastData, true);
       rebuildSharedTooltip();
     }
-
-    const retryDelay = Math.min(rateLimitBackoff, 600);
-    rateLimitBackoff = Math.min(rateLimitBackoff * 2, 600);
-
-    setTimeout(() => {
-      if (isVisible) {
-        refreshApiUsage();
-      }
-    }, retryDelay * 1000);
     return;
   }
 
   if (result.error) {
+    consecutiveFailures++;
+    log(`API error: ${result.error} (attempt #${consecutiveFailures})`);
     if (lastData) {
       statusBar.update(lastData, true);
       rebuildSharedTooltip();
@@ -146,12 +296,17 @@ async function refreshApiUsage(): Promise<void> {
 
   if (result.data) {
     lastData = result.data;
-    rateLimitBackoff = 60;
+    lastSuccessfulFetch = Date.now();
+    consecutiveFailures = 0;
     statusBar.update(result.data, false);
     rebuildSharedTooltip();
 
     extensionContext.globalState.update(CACHE_KEY, result.data);
     extensionContext.globalState.update(CACHE_TIME_KEY, Date.now());
+
+    const fh = result.data.five_hour?.utilization?.toFixed(0) ?? "?";
+    const sd = result.data.seven_day?.utilization?.toFixed(0) ?? "?";
+    log(`Success: 5h=${fh}% 7d=${sd}%`);
   }
 }
 
@@ -165,15 +320,49 @@ async function refreshLocalStats(): Promise<void> {
   }
 }
 
+// ── StatusLine file integration ──────────────────────────────────────
+// Claude Code can be configured to write status data to a file via statusLine.
+// We watch that file for changes and use it as a supplementary data source.
+
+function readStatusLineFile(): void {
+  try {
+    if (!fs.existsSync(STATUS_LINE_FILE)) return;
+    const raw = fs.readFileSync(STATUS_LINE_FILE, "utf-8");
+    const data = JSON.parse(raw);
+    if (data.timestamp && data.cost !== undefined) {
+      log(`StatusLine file: cost=$${data.cost?.toFixed(2)}, model=${data.model ?? "?"}`);
+    }
+  } catch {
+    // File may not exist or be malformed
+  }
+}
+
+function watchStatusLineFile(): void {
+  const dir = path.dirname(STATUS_LINE_FILE);
+  const basename = path.basename(STATUS_LINE_FILE);
+  try {
+    if (!fs.existsSync(dir)) return;
+    statusLineWatcher = fs.watch(dir, (event, filename) => {
+      if (filename === basename && event === "change") {
+        readStatusLineFile();
+      }
+    });
+    statusLineWatcher.on("error", () => {
+      // Silently ignore watch errors
+    });
+  } catch {
+    // Directory may not exist
+  }
+}
+
 /**
  * Rebuild and assign the tooltip to the single status bar item.
  */
 function rebuildSharedTooltip(): void {
   const config = vscode.workspace.getConfiguration("claudeUsageBar");
   const budget = config.get<number>("dailyBudget", 0);
-  const md = buildUnifiedTooltip(lastLocalStats, lastData, budget);
+  const md = buildUnifiedTooltip(lastLocalStats, lastData, budget, lastSuccessfulFetch);
   statusBar.setTooltip(md);
-
 }
 
 // ── Color helpers ──
@@ -217,10 +406,22 @@ function formatResetTime(resetsAt: string | null): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+function formatAge(timestamp: number | null): string {
+  if (!timestamp) return "never";
+  const diffMs = Date.now() - timestamp;
+  if (diffMs < 60_000) return "just now";
+  const m = Math.floor(diffMs / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 function buildUnifiedTooltip(
   stats: DailyStats | null,
   apiData: UsageData | null,
   budget: number,
+  lastFetchTime: number | null,
 ): vscode.MarkdownString {
   const lines: string[] = [];
 
@@ -228,6 +429,7 @@ function buildUnifiedTooltip(
   // SECTION 1: Rate Limits (from API)
   // ══════════════════════════════════════════════
   if (apiData) {
+    const ageStr = formatAge(lastFetchTime);
     lines.push(
       `## $(shield) Rate Limits`,
       "",
@@ -256,7 +458,9 @@ function buildUnifiedTooltip(
         lines.push(`| ${lim.icon} ${lim.name} | | ${col(C.dim, "N/A")} | |`);
       }
     }
-    lines.push("");
+
+    const intervalMin = Math.round(getAdaptiveIntervalMs() / 60_000);
+    lines.push("", `$(history) _Updated ${ageStr}_ \u2003 $(sync) _Auto-refreshes every ${intervalMin}m_ \u2003 $(refresh) _Ctrl+Alt+R_`, "");
   }
 
   // ══════════════════════════════════════════════
@@ -343,7 +547,7 @@ function buildUnifiedTooltip(
   lines.push(
     `---`,
     "",
-    `$(link-external) _Click to open dashboard_ \u2003\u2003 $(refresh) _Ctrl+Alt+R refresh_`,
+    `$(link-external) _Click to open dashboard_`,
   );
 
   const md = new vscode.MarkdownString(lines.join("\n"));
@@ -370,30 +574,4 @@ function formatModelName(model: string): string {
     return match[1].charAt(0).toUpperCase() + match[1].slice(1) + " " + match[2] + "." + match[3];
   }
   return stripped.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
-function getIntervalMs(): number {
-  const config = vscode.workspace.getConfiguration("claudeUsageBar");
-  const seconds = config.get<number>("refreshInterval", 300);
-  return Math.max(seconds, 60) * 1000;
-}
-
-function startTimer(): void {
-  stopTimer();
-  refreshTimer = setInterval(() => {
-    if (isVisible) {
-      refreshAll();
-    }
-  }, getIntervalMs());
-}
-
-function stopTimer(): void {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = undefined;
-  }
-}
-
-function restartTimer(): void {
-  startTimer();
 }

@@ -2,7 +2,7 @@
   "name": "claude-code-usage-dashboard",
   "displayName": "Claude Code Usage Dashboard",
   "description": "Monitor Claude Code rate limits, costs, and token usage directly in your VS Code status bar with an analytics dashboard",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "man-vu",
   "icon": "images/icon.png",
   "license": "MIT",
@@ -96,12 +96,19 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "eslint": "^8.57.1",
     "sharp": "^0.34.5",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.2"
   }
 }

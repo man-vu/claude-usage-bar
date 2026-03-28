@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { DailyStats } from "./scanner";
+import { UsageData } from "./api";
 
 export interface SubscriptionInfo {
   type: string;  // "max", "pro", "free", "unknown"
@@ -16,10 +17,11 @@ export class DashboardPanel {
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 
     // Handle messages from the webview (refresh button)
+    // Uses refreshDashboard (JSONL re-scan only) to avoid hitting the rate-limited API
     this.panel.webview.onDidReceiveMessage(
       (msg) => {
         if (msg.command === "refresh") {
-          vscode.commands.executeCommand("claudeUsageBar.showDashboard");
+          vscode.commands.executeCommand("claudeUsageBar.refreshDashboard");
         }
       },
       null,
@@ -27,10 +29,10 @@ export class DashboardPanel {
     );
   }
 
-  static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo): DashboardPanel {
+  static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): DashboardPanel {
     if (DashboardPanel.instance) {
       DashboardPanel.instance.panel.reveal(vscode.ViewColumn.One);
-      DashboardPanel.instance.updateContent(stats, sub);
+      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
       return DashboardPanel.instance;
     }
 
@@ -42,12 +44,12 @@ export class DashboardPanel {
     );
 
     DashboardPanel.instance = new DashboardPanel(panel);
-    DashboardPanel.instance.updateContent(stats, sub);
+    DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
     return DashboardPanel.instance;
   }
 
-  updateContent(stats: DailyStats[], sub?: SubscriptionInfo): void {
-    this.panel.webview.html = buildHtml(stats, sub);
+  updateContent(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): void {
+    this.panel.webview.html = buildHtml(stats, sub, usage, lastFetchTime);
   }
 
   private dispose(): void {
@@ -326,6 +328,7 @@ function buildDonutChart(models: Record<string, { cost: number; messages: number
   </svg>`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildTokenAreaChart(days: DailyStats[], width: number, height: number): string {
   if (days.length === 0) return "";
   const sorted = days.slice().sort((a, b) => a.date.localeCompare(b.date));
@@ -425,7 +428,7 @@ function buildRingGauge(value: number, total: number, size: number, color: strin
 
 // ── Main HTML builder ─────────────────────────────────────────────────
 
-function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
+function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): string {
   const d = compute(stats);
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
@@ -482,6 +485,29 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo): string {
   const subInfo = formatSubscription(sub);
   const isSubscription = sub && sub.type !== "unknown" && sub.type !== "free";
   const projectedMonthly = d.avgDailyCost * 30;
+
+  // Rate limit data
+  const rateLimits: { label: string; utilization: number; resetsAt: string | null }[] = [];
+  if (usage) {
+    if (usage.five_hour) rateLimits.push({ label: "5-hour session", utilization: usage.five_hour.utilization, resetsAt: usage.five_hour.resets_at });
+    if (usage.seven_day) rateLimits.push({ label: "7-day rolling", utilization: usage.seven_day.utilization, resetsAt: usage.seven_day.resets_at });
+    if (usage.seven_day_opus && usage.seven_day_opus.utilization > 0) rateLimits.push({ label: "7-day Opus", utilization: usage.seven_day_opus.utilization, resetsAt: usage.seven_day_opus.resets_at });
+  }
+
+  function fmtResetTime(resetsAt: string | null): string {
+    if (!resetsAt) return "";
+    const ms = new Date(resetsAt).getTime() - Date.now();
+    if (ms <= 0) return "now";
+    const h = Math.floor(ms / 3_600_000);
+    const m = Math.floor((ms % 3_600_000) / 60_000);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  function rlColor(pct: number): string {
+    if (pct >= 90) return "#f38ba8";
+    if (pct >= 70) return "#f9e2af";
+    return "#a6e3a1";
+  }
 
   return /*html*/ `<!DOCTYPE html>
 <html lang="en">
@@ -670,6 +696,85 @@ body::before {
   border-color: rgba(255,255,255,0.1);
   box-shadow: 0 8px 32px rgba(0,0,0,0.2);
 }
+
+/* ── Rate Limits ── */
+.rate-limits {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.rate-limit-card {
+  flex: 1;
+  background: var(--bg-surface);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  animation: fadeUp 0.4s ease-out both;
+}
+.rate-limit-card:hover {
+  border-color: rgba(255,255,255,0.1);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+.rl-gauge {
+  flex-shrink: 0;
+}
+.rl-info {
+  flex: 1;
+  min-width: 0;
+}
+.rl-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.rl-bar-bg {
+  height: 8px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.rl-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease;
+}
+.rl-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  color: var(--text-tertiary);
+}
+.rl-pct {
+  font-size: 1.1rem;
+  font-weight: 800;
+  line-height: 1;
+  margin-bottom: 2px;
+}
+
+/* ── Rate limit info note ── */
+.rl-info-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin-top: -6px;
+  margin-bottom: 14px;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  background: rgba(137,180,250,0.04);
+  border: 1px solid rgba(137,180,250,0.08);
+  border-radius: var(--radius-sm);
+}
+.rl-info-note svg { flex-shrink: 0; opacity: 0.5; }
 
 /* ── KPI Hero Cards ── */
 .kpi-top {
@@ -957,31 +1062,6 @@ body::before {
 .tip-value-tokens { color: var(--accent-peach); font-weight: 600; white-space: nowrap; }
 .tip-value-msgs { color: var(--text-secondary); font-weight: 600; white-space: nowrap; }
 
-/* ── SVG animations ── */
-@keyframes lineDrawIn {
-  from { stroke-dashoffset: var(--line-length); }
-  to { stroke-dashoffset: 0; }
-}
-@keyframes areaFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes dotPopIn {
-  from { r: 0; opacity: 0; }
-  to { r: 3; opacity: 0.4; }
-}
-.chart-line {
-  stroke-dasharray: var(--line-length);
-  stroke-dashoffset: 0;
-  animation: lineDrawIn 1s ease-out both;
-}
-.chart-area-fill {
-  animation: areaFadeIn 0.8s ease-out 0.3s both;
-}
-.data-dot {
-  animation: dotPopIn 0.3s ease-out both;
-}
-
 /* ── SVG interactions ── */
 .data-dot { transition: r 0.15s, filter 0.15s; cursor: pointer; }
 .data-dot:hover { r: 7; filter: drop-shadow(0 0 6px rgba(137,180,250,0.6)); }
@@ -1148,6 +1228,7 @@ body::before {
   .charts-row { grid-template-columns: 1fr; }
   .secondary-row { grid-template-columns: 1fr; }
   .insights-row { grid-template-columns: 1fr; }
+  .rate-limits { flex-direction: column; }
   .donut-layout { flex-direction: column; }
   .token-gauges { flex-wrap: wrap; }
   .period-tabs { flex-wrap: wrap; }
@@ -1392,8 +1473,28 @@ body::before {
   background: rgba(137,180,250,0.1);
   border-color: rgba(137,180,250,0.3);
 }
-.refresh-btn svg { transition: transform 0.3s; }
-.refresh-btn:hover svg { transform: rotate(180deg); }
+.refresh-btn .refresh-icon { transition: transform 0.3s; }
+.refresh-btn:hover .refresh-icon { transform: rotate(180deg); }
+.refresh-btn.loading .refresh-icon {
+  animation: spin 0.8s linear infinite;
+}
+.refresh-btn.loading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.dashboard.refreshing > *:not(#chart-tooltip) {
+  opacity: 0.5;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+.dashboard.refreshing > .header {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 /* ── New sections layout ── */
 .insights-row {
@@ -1424,9 +1525,9 @@ body::before {
         <span class="sub-dot" style="background:${subInfo.color}"></span>
         ${subInfo.badge}
       </div>` : ""}
-      <button class="refresh-btn" onclick="(acquireVsCodeApi()).postMessage({command:'refresh'})">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z" fill="currentColor"/></svg>
-        Refresh
+      <button class="refresh-btn" id="refresh-btn">
+        <svg class="refresh-icon" width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z" fill="currentColor"/></svg>
+        <span class="refresh-label">Refresh</span>
       </button>
       <div class="header-meta">
         <span id="header-period-label">Last 7 days</span> &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -1466,6 +1567,32 @@ body::before {
         </div>` : ""}
       </div>
     </div>
+  </div>
+  ` : ""}
+
+  <!-- Rate Limits -->
+  ${rateLimits.length > 0 ? `
+  <div class="rate-limits">
+    ${rateLimits.map((rl, i) => {
+      const color = rlColor(rl.utilization);
+      const reset = fmtResetTime(rl.resetsAt);
+      return `<div class="rate-limit-card" style="animation-delay:${i * 0.05}s">
+        <div class="rl-info">
+          <div class="rl-label">${rl.label}</div>
+          <div class="rl-pct" style="color:${color}">${rl.utilization.toFixed(0)}%</div>
+          <div class="rl-bar-bg"><div class="rl-bar-fill" style="width:${Math.min(rl.utilization, 100)}%;background:${color}"></div></div>
+          <div class="rl-meta">
+            <span>${rl.utilization >= 100 ? "At limit" : rl.utilization >= 90 ? "Critical" : rl.utilization >= 70 ? "Warning" : "Normal"}</span>
+            ${reset ? `<span>Resets in ${reset}</span>` : ""}
+          </div>
+        </div>
+      </div>`;
+    }).join("\n")}
+  </div>
+  <div class="rl-info-note">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11zM8 4a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 0 .37.65l2.5 1.5a.75.75 0 1 0 .76-1.3L8.75 7.87V4.75A.75.75 0 0 0 8 4z"/></svg>
+    Rate limits auto-refresh every ~5 min due to API rate limiting. Last updated: ${lastFetchTime ? new Date(lastFetchTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown"}.
+    Use Ctrl+Alt+R to force a refresh.
   </div>
   ` : ""}
 
@@ -2471,6 +2598,17 @@ body::before {
       switchPeriod(currentPeriod);
     });
   });
+
+  // ── Refresh button with loading state ──
+  var refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      refreshBtn.classList.add('loading');
+      refreshBtn.querySelector('.refresh-label').textContent = 'Refreshing...';
+      document.querySelector('.dashboard').classList.add('refreshing');
+      (acquireVsCodeApi()).postMessage({command:'refresh'});
+    });
+  }
 
   // ── Initial chart listeners ──
   attachChartListeners();

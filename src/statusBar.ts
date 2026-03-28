@@ -58,7 +58,7 @@ export class StatusBarManager {
   }
 
   /** Update status bar text and coloring from API data. Tooltip is set externally. */
-  update(data: UsageData, stale: boolean = false): void {
+  update(data: UsageData, _stale: boolean = false): void {
     const config = vscode.workspace.getConfiguration("claudeUsageBar");
     const warningThreshold = config.get<number>("warningThreshold", 70);
     const criticalThreshold = config.get<number>("criticalThreshold", 90);
@@ -103,7 +103,8 @@ export class StatusBarManager {
 }
 
 function buildBar(percentage: number): string {
-  const filled = Math.round((percentage / 100) * BAR_LENGTH);
+  const clamped = Math.max(0, Math.min(percentage, 100));
+  const filled = Math.round((clamped / 100) * BAR_LENGTH);
   const empty = BAR_LENGTH - filled;
   return BAR_FULL.repeat(filled) + BAR_EMPTY.repeat(empty);
 }

@@ -26,6 +26,13 @@ export interface FetchResult {
  */
 export function fetchUsage(accessToken: string): Promise<FetchResult> {
   return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result: FetchResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
     const url = new URL(USAGE_URL);
 
     const options: https.RequestOptions = {
@@ -52,7 +59,7 @@ export function fetchUsage(accessToken: string): Promise<FetchResult> {
             res.headers["retry-after"] as string,
             10
           );
-          resolve({
+          settle({
             data: null,
             error: "rate_limited",
             retryAfter: isNaN(retryAfter) ? 60 : Math.max(retryAfter, 10),
@@ -61,7 +68,7 @@ export function fetchUsage(accessToken: string): Promise<FetchResult> {
         }
 
         if (res.statusCode !== 200) {
-          resolve({
+          settle({
             data: null,
             error: `HTTP ${res.statusCode}`,
             retryAfter: null,
@@ -71,9 +78,9 @@ export function fetchUsage(accessToken: string): Promise<FetchResult> {
 
         try {
           const data = JSON.parse(body) as UsageData;
-          resolve({ data, error: null, retryAfter: null });
+          settle({ data, error: null, retryAfter: null });
         } catch {
-          resolve({
+          settle({
             data: null,
             error: "Invalid JSON response",
             retryAfter: null,
@@ -83,19 +90,19 @@ export function fetchUsage(accessToken: string): Promise<FetchResult> {
     });
 
     req.on("error", (err) => {
-      resolve({ data: null, error: err.message, retryAfter: null });
+      settle({ data: null, error: err.message, retryAfter: null });
     });
 
     // Socket-level inactivity timeout
     req.setTimeout(5000, () => {
       req.destroy();
-      resolve({ data: null, error: "Request timeout", retryAfter: null });
+      settle({ data: null, error: "Request timeout", retryAfter: null });
     });
 
     // Hard absolute deadline — kills request no matter what after 6s
     const hardTimeout = setTimeout(() => {
       req.destroy();
-      resolve({ data: null, error: "Request timeout", retryAfter: null });
+      settle({ data: null, error: "Request timeout", retryAfter: null });
     }, 6000);
 
     req.on("close", () => clearTimeout(hardTimeout));
