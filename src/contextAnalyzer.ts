@@ -262,16 +262,18 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
   const modelVer = modelBase.includes("4-6") ? "4.6" : modelBase.includes("4-5") ? "4.5" : "";
   const modelDisplay = `${modelFamily}${modelVer ? " " + modelVer : ""}${is1MContext ? " (1M context)" : ""}`;
 
-  // ── API usage ──
+  // ── API usage (lives at m.message.usage in JSONL) ──
   let apiUsage: ContextAnalysis["apiUsage"] = null;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m.type === "assistant" && (m.usage || m.input_tokens != null)) {
-      apiUsage = m.usage ?? {
-        input_tokens: m.input_tokens ?? 0,
-        output_tokens: m.output_tokens ?? 0,
-        cache_creation_input_tokens: m.cache_creation_input_tokens ?? 0,
-        cache_read_input_tokens: m.cache_read_input_tokens ?? 0,
+    if (m.type !== "assistant") continue;
+    const u = m.message?.usage ?? m.usage;
+    if (u && (u.input_tokens != null || u.cache_read_input_tokens != null)) {
+      apiUsage = {
+        input_tokens: u.input_tokens ?? 0,
+        output_tokens: u.output_tokens ?? 0,
+        cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+        cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
       };
       break;
     }
@@ -466,7 +468,17 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
       });
     }
   });
-  if (msgTokens) categories.push({ name: "Messages", tokens: msgTokens, color: COLORS.messages });
+  // If we have actual API usage, derive message tokens from the authoritative input_tokens.
+  // The API's input_tokens includes everything the model sees (system prompt, tools, messages).
+  // Subtract known non-message categories to get the true message token count.
+  if (apiUsage && apiUsage.input_tokens > 0) {
+    const apiTotal = apiUsage.input_tokens + (apiUsage.cache_read_input_tokens ?? 0) + (apiUsage.cache_creation_input_tokens ?? 0);
+    const nonMessageTokens = categories.reduce((s, c) => s + (c.isDeferred ? 0 : c.tokens), 0);
+    const derivedMsgTokens = Math.max(0, apiTotal - nonMessageTokens);
+    if (msgTokens) categories.push({ name: "Messages", tokens: derivedMsgTokens, color: COLORS.messages });
+  } else {
+    if (msgTokens) categories.push({ name: "Messages", tokens: msgTokens, color: COLORS.messages });
+  }
 
   // Reserved
   const reservedTokens = AUTOCOMPACT_BUFFER + MAX_OUTPUT_RESERVE;
