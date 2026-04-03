@@ -7,6 +7,8 @@ import { fetchUsage, UsageData } from "./api";
 import { StatusBarManager } from "./statusBar";
 import { scanConversations, scanToday, DailyStats } from "./scanner";
 import { DashboardPanel, SubscriptionInfo } from "./dashboard";
+import { analyzeCacheHealth } from "./cacheAnalyzer";
+import { SessionMonitor, SessionSnapshot } from "./sessionMonitor";
 
 let statusBar: StatusBarManager;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -19,6 +21,7 @@ let lastSuccessfulFetch: number | null = null;
 let lastAttemptTime = 0;
 let outputChannel: vscode.OutputChannel;
 let statusLineWatcher: fs.FSWatcher | undefined;
+let sessionMonitor: SessionMonitor | undefined;
 
 const CACHE_KEY = "claudeUsageBar.lastData";
 const CACHE_TIME_KEY = "claudeUsageBar.lastDataTime";
@@ -110,12 +113,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const dashboardCmd = vscode.commands.registerCommand(
     "claudeUsageBar.showDashboard",
     async () => {
-      const [stats, creds] = await Promise.all([
+      // Run all data fetches in parallel
+      const [stats, creds, cacheResult] = await Promise.all([
         scanConversations(365, 0),
         getCredentials(),
+        analyzeCacheHealth(),
       ]);
 
-      // Only try a fresh fetch if we haven't failed recently
       let usageData = lastData;
       const timeSinceLastAttempt = Date.now() - lastAttemptTime;
       if (creds?.accessToken && consecutiveFailures < 2 && timeSinceLastAttempt > MIN_API_GAP_MS) {
@@ -131,37 +135,35 @@ export function activate(context: vscode.ExtensionContext): void {
           extensionContext.globalState.update(CACHE_KEY, result.data);
           extensionContext.globalState.update(CACHE_TIME_KEY, Date.now());
           rebuildSharedTooltip();
-          log("Dashboard: fresh data obtained");
         } else {
           consecutiveFailures++;
-          log(`Dashboard: API returned ${result.error}, using cached data (age: ${formatAge(lastSuccessfulFetch)})`);
+          log(`Dashboard: API ${result.error}, using cached data`);
         }
-      } else {
-        log(`Dashboard: using cached data (failures: ${consecutiveFailures}, last attempt: ${formatAge(lastAttemptTime || null)})`);
       }
 
       const sub: SubscriptionInfo = {
         type: creds?.subscriptionType ?? "unknown",
         tier: creds?.rateLimitTier ?? "unknown",
       };
-      DashboardPanel.show(context, stats, sub, usageData ?? undefined, lastSuccessfulFetch);
+
+      DashboardPanel.show(context, stats, sub, usageData ?? undefined, lastSuccessfulFetch, cacheResult);
+      startSessionMonitor();
     }
   );
 
-  // Dashboard refresh: re-scans JSONL only, no API call (avoids rate limit)
   const refreshDashboardCmd = vscode.commands.registerCommand(
     "claudeUsageBar.refreshDashboard",
     async () => {
-      log("Dashboard refresh: re-scanning local data (no API call)");
-      const [stats, creds] = await Promise.all([
+      const [stats, creds, cacheResult] = await Promise.all([
         scanConversations(365, 0),
         getCredentials(),
+        analyzeCacheHealth(),
       ]);
       const sub: SubscriptionInfo = {
         type: creds?.subscriptionType ?? "unknown",
         tier: creds?.rateLimitTier ?? "unknown",
       };
-      DashboardPanel.show(context, stats, sub, lastData ?? undefined, lastSuccessfulFetch);
+      DashboardPanel.show(context, stats, sub, lastData ?? undefined, lastSuccessfulFetch, cacheResult);
     }
   );
 
@@ -205,9 +207,30 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   stopTimer();
+  stopSessionMonitor();
   if (statusLineWatcher) {
     statusLineWatcher.close();
     statusLineWatcher = undefined;
+  }
+}
+
+function startSessionMonitor(): void {
+  if (sessionMonitor) return;
+  sessionMonitor = new SessionMonitor();
+  sessionMonitor.on("update", (snap: SessionSnapshot) => {
+    DashboardPanel.postSessionUpdate(snap);
+  });
+  sessionMonitor.start();
+  DashboardPanel.postSessionUpdate(sessionMonitor.getSnapshot());
+  DashboardPanel.onDispose(stopSessionMonitor);
+  log("Session monitor started");
+}
+
+function stopSessionMonitor(): void {
+  if (sessionMonitor) {
+    sessionMonitor.stop();
+    sessionMonitor = undefined;
+    log("Session monitor stopped");
   }
 }
 

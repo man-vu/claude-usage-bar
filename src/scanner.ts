@@ -1,23 +1,9 @@
 import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
 import * as readline from "readline";
-
-// Model pricing per 1M tokens (API-equivalent costs)
-const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
-  "claude-opus-4-6": { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
-  "claude-opus-4-5": { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
-  "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
-  "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
-  "claude-haiku-4-5": { input: 0.8, output: 4, cacheWrite: 1, cacheRead: 0.08 },
-};
-
-const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
-
-function normalizeModel(raw: string | undefined): string | null {
-  if (!raw || raw === "<synthetic>" || !raw.startsWith("claude-")) return null;
-  return raw.replace(/-\d{8,}$/, "");
-}
+import {
+  MODEL_PRICING, DEFAULT_PRICING, normalizeModel, calculateCost,
+  findJsonlFiles as findFiles,
+} from "./shared";
 
 export interface DailyStats {
   date: string;
@@ -28,23 +14,18 @@ export interface DailyStats {
   cacheReadTokens: number;
   messageCount: number;
   modelBreakdown: Record<string, { cost: number; messages: number; inputTokens: number; outputTokens: number }>;
-  // New fields
-  toolUsage: Record<string, number>;       // tool name → invocation count
-  hourlyActivity: number[];                // 24 slots (0-23), message count per hour
-  sessionCount: number;                    // unique session files contributing to this day
+  toolUsage: Record<string, number>;
+  hourlyActivity: number[];
+  sessionCount: number;
   projectBreakdown: Record<string, { cost: number; messages: number; tokens: number }>;
 }
 
-// Raw JSONL entry — we now parse more broadly
 interface JsonlEntry {
   type: string;
   timestamp: string;
-  sessionId?: string;
-  cwd?: string;
   message?: {
     model?: string;
     content?: Array<{ type: string; name?: string }>;
-    stop_reason?: string;
     usage?: {
       input_tokens?: number;
       output_tokens?: number;
@@ -54,16 +35,15 @@ interface JsonlEntry {
   };
 }
 
-export async function scanConversations(days: number = 7, maxFiles: number = MAX_FILES): Promise<DailyStats[]> {
-  const projectsDir = path.join(os.homedir(), ".claude", "projects");
-  if (!fs.existsSync(projectsDir)) return [];
+const MAX_FILES = 80;
 
+export async function scanConversations(days: number = 7, maxFiles: number = MAX_FILES): Promise<DailyStats[]> {
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - days);
   cutoffDate.setHours(0, 0, 0, 0);
 
+  const jsonlFiles = findFiles(cutoffDate, maxFiles);
   const statsMap = new Map<string, DailyStats>();
-  const jsonlFiles = findJsonlFiles(projectsDir, cutoffDate, maxFiles);
 
   const batchSize = 15;
   for (let i = 0; i < jsonlFiles.length; i += batchSize) {
@@ -82,82 +62,18 @@ export async function scanToday(): Promise<DailyStats> {
 
 function emptyStats(date: string): DailyStats {
   return {
-    date,
-    totalCost: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheWriteTokens: 0,
-    cacheReadTokens: 0,
-    messageCount: 0,
-    modelBreakdown: {},
-    toolUsage: {},
+    date, totalCost: 0, inputTokens: 0, outputTokens: 0,
+    cacheWriteTokens: 0, cacheReadTokens: 0, messageCount: 0,
+    modelBreakdown: {}, toolUsage: {},
     hourlyActivity: new Array(24).fill(0),
-    sessionCount: 0,
-    projectBreakdown: {},
+    sessionCount: 0, projectBreakdown: {},
   };
 }
 
-interface FileEntry {
-  path: string;
-  mtime: number;
-  project: string; // decoded project directory name
-}
-
-const MAX_FILES = 80;
-
-/**
- * Decode project directory name to human-readable path.
- * "d--claude-code-usage-bar" → "D:/claude-code-usage-bar"
- */
-function decodeProjectName(dirName: string): string {
-  // Format: drive--path-parts  e.g. "d--my-project" → "D:/my-project"
-  const match = dirName.match(/^([a-z])--(.+)$/);
-  if (match) {
-    const parts = match[2].split("--");
-    return match[1].toUpperCase() + ":/" + parts.join("/");
-  }
-  return dirName;
-}
-
-function findJsonlFiles(dir: string, cutoffDate: Date, maxFiles: number = MAX_FILES): FileEntry[] {
-  const files: FileEntry[] = [];
-  const cutoffMs = cutoffDate.getTime();
-
-  try {
-    for (const project of fs.readdirSync(dir)) {
-      const projectDir = path.join(dir, project);
-      let dirStat: fs.Stats;
-      try { dirStat = fs.statSync(projectDir); } catch { continue; }
-      if (!dirStat.isDirectory()) continue;
-      if (dirStat.mtimeMs < cutoffMs) continue;
-
-      const projectName = decodeProjectName(project);
-      try {
-        for (const file of fs.readdirSync(projectDir)) {
-          if (!file.endsWith(".jsonl")) continue;
-          const filePath = path.join(projectDir, file);
-          try {
-            const st = fs.statSync(filePath);
-            if (st.mtimeMs >= cutoffMs) {
-              files.push({ path: filePath, mtime: st.mtimeMs, project: projectName });
-            }
-          } catch { /* skip */ }
-        }
-      } catch { /* skip */ }
-    }
-  } catch { /* Permission errors */ }
-
-  files.sort((a, b) => b.mtime - a.mtime);
-  return maxFiles > 0 ? files.slice(0, maxFiles) : files;
-}
-
 async function processFile(
-  filePath: string,
-  projectName: string,
-  cutoffDate: Date,
-  statsMap: Map<string, DailyStats>
+  filePath: string, projectName: string,
+  cutoffDate: Date, statsMap: Map<string, DailyStats>
 ): Promise<void> {
-  // Track which sessions contribute to which dates
   const sessionDates = new Set<string>();
 
   return new Promise((resolve) => {
@@ -166,9 +82,7 @@ async function processFile(
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
     rl.on("line", (line) => {
-      // Only parse assistant messages (they have usage + tool_use data)
       if (!line.includes('"type":"assistant"')) return;
-
       try {
         const entry = JSON.parse(line) as JsonlEntry;
         if (entry.type !== "assistant" || !entry.message?.usage) return;
@@ -183,40 +97,31 @@ async function processFile(
         if (!model) return;
         const pricing = MODEL_PRICING[model] ?? DEFAULT_PRICING;
 
-        const inputTokens = usage.input_tokens ?? 0;
-        const outputTokens = usage.output_tokens ?? 0;
+        const input = usage.input_tokens ?? 0;
+        const output = usage.output_tokens ?? 0;
         const cacheWrite = usage.cache_creation_input_tokens ?? 0;
         const cacheRead = usage.cache_read_input_tokens ?? 0;
-
-        const cost =
-          (inputTokens / 1_000_000) * pricing.input +
-          (outputTokens / 1_000_000) * pricing.output +
-          (cacheWrite / 1_000_000) * pricing.cacheWrite +
-          (cacheRead / 1_000_000) * pricing.cacheRead;
+        const cost = calculateCost(input, output, cacheWrite, cacheRead, pricing);
 
         if (!statsMap.has(dateKey)) statsMap.set(dateKey, emptyStats(dateKey));
         const stats = statsMap.get(dateKey)!;
 
         stats.totalCost += cost;
-        stats.inputTokens += inputTokens;
-        stats.outputTokens += outputTokens;
+        stats.inputTokens += input;
+        stats.outputTokens += output;
         stats.cacheWriteTokens += cacheWrite;
         stats.cacheReadTokens += cacheRead;
         stats.messageCount += 1;
-
-        // Hourly activity
         stats.hourlyActivity[hour] += 1;
 
-        // Model breakdown
         if (!stats.modelBreakdown[model]) {
           stats.modelBreakdown[model] = { cost: 0, messages: 0, inputTokens: 0, outputTokens: 0 };
         }
         stats.modelBreakdown[model].cost += cost;
         stats.modelBreakdown[model].messages += 1;
-        stats.modelBreakdown[model].inputTokens += inputTokens;
-        stats.modelBreakdown[model].outputTokens += outputTokens;
+        stats.modelBreakdown[model].inputTokens += input;
+        stats.modelBreakdown[model].outputTokens += output;
 
-        // Tool usage — extract from message.content[]
         if (entry.message.content) {
           for (const block of entry.message.content) {
             if (block.type === "tool_use" && block.name) {
@@ -225,21 +130,19 @@ async function processFile(
           }
         }
 
-        // Project breakdown
         if (!stats.projectBreakdown[projectName]) {
           stats.projectBreakdown[projectName] = { cost: 0, messages: 0, tokens: 0 };
         }
         stats.projectBreakdown[projectName].cost += cost;
         stats.projectBreakdown[projectName].messages += 1;
-        stats.projectBreakdown[projectName].tokens += inputTokens + outputTokens;
+        stats.projectBreakdown[projectName].tokens += input + output;
 
-        // Session tracking
         const sessionDateKey = filePath + "|" + dateKey;
         if (!sessionDates.has(sessionDateKey)) {
           sessionDates.add(sessionDateKey);
           stats.sessionCount += 1;
         }
-      } catch { /* Skip malformed lines */ }
+      } catch { /* skip */ }
     });
 
     rl.on("close", () => { clearTimeout(timeout); resolve(); });
