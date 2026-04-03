@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { PROJECTS_DIR, normalizeModel, fmtTokens } from "./shared";
+import { PROJECTS_DIR, decodeProjectName, normalizeModel, fmtTokens } from "./shared";
 
 // ── Constants (from Claude Code source: autoCompact.ts, tokens.ts) ──
 
@@ -126,11 +126,47 @@ function est(x: unknown): number {
   return Math.ceil(s.length / CHARS_PER_TOKEN);
 }
 
-function findLatestSession(): string | null {
+/**
+ * Encode a workspace path to match Claude Code's project directory naming.
+ * e.g. "D:/projects/foo" → "D--projects-foo" (or "d--projects-foo")
+ */
+function encodeWorkspacePath(wsPath: string): string {
+  // Normalize to forward slashes, strip trailing slash
+  const normalized = wsPath.replace(/\\/g, "/").replace(/\/$/, "");
+  // "D:/projects/foo" → drive="D", rest="projects-foo"
+  const match = normalized.match(/^([a-zA-Z]):\/(.+)$/);
+  if (match) {
+    const drive = match[1].toUpperCase();
+    const rest = match[2].replace(/\//g, "-");
+    return `${drive}--${rest}`;
+  }
+  // Unix paths: "/home/user/foo" → "-home-user-foo" — encode slashes as dashes
+  return normalized.replace(/\//g, "-").replace(/^-/, "");
+}
+
+function findLatestSession(workspacePath?: string): string | null {
   if (!fs.existsSync(PROJECTS_DIR)) return null;
+
+  // If workspace given, find the matching project directory first
+  let targetProjectDir: string | null = null;
+  if (workspacePath) {
+    const encoded = encodeWorkspacePath(workspacePath);
+    for (const project of fs.readdirSync(PROJECTS_DIR)) {
+      // Case-insensitive match since Windows paths can differ in case
+      if (project.toLowerCase() === encoded.toLowerCase()) {
+        targetProjectDir = path.join(PROJECTS_DIR, project);
+        break;
+      }
+    }
+  }
+
+  // Search in target project dir, or fall back to all projects
+  const searchDirs = targetProjectDir
+    ? [targetProjectDir]
+    : fs.readdirSync(PROJECTS_DIR).map(p => path.join(PROJECTS_DIR, p));
+
   let best: { path: string; mtime: number } | null = null;
-  for (const project of fs.readdirSync(PROJECTS_DIR)) {
-    const dir = path.join(PROJECTS_DIR, project);
+  for (const dir of searchDirs) {
     try {
       if (!fs.statSync(dir).isDirectory()) continue;
       for (const file of fs.readdirSync(dir)) {
@@ -148,8 +184,8 @@ function findLatestSession(): string | null {
 
 // ── Main analysis ───────────────────────────────────────────────────
 
-export function analyzeContext(): ContextAnalysis | null {
-  const filePath = findLatestSession();
+export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
+  const filePath = findLatestSession(workspacePath);
   if (!filePath) return null;
 
   const lines = fs.readFileSync(filePath, "utf8").trim().split("\n");

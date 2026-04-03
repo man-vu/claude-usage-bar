@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 import { ContextAnalysis, analyzeContext } from "./contextAnalyzer";
 import { fmtTokens } from "./shared";
 
+function getWorkspacePath(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
 export class ContextViewPanel {
   private static instance: ContextViewPanel | undefined;
   private panel: vscode.WebviewPanel;
@@ -35,7 +39,7 @@ export class ContextViewPanel {
   }
 
   private update(): void {
-    const data = analyzeContext();
+    const data = analyzeContext(getWorkspacePath());
     this.panel.webview.html = data ? buildHtml(data) : errorHtml();
   }
 

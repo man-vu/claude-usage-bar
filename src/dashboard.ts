@@ -410,7 +410,8 @@ function buildRingGaugeWithLabel(value: number, total: number, size: number, col
 function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): string {
   const d = compute(stats);
   const cacheView = cache ? buildCacheViewHTML(cache) : null;
-  const contextData = analyzeContext();
+  const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const contextData = analyzeContext(wsPath);
   const contextView: ContextViewHTML | null = contextData ? buildContextViewHTML(contextData) : null;
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
