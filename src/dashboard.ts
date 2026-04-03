@@ -3,6 +3,8 @@ import { DailyStats } from "./scanner";
 import { UsageData } from "./api";
 import { CacheAnalysisResult } from "./cacheAnalyzer";
 import { buildCacheViewHTML } from "./cacheDashboard";
+import { buildContextViewHTML, ContextViewHTML } from "./contextDashboard";
+import { analyzeContext } from "./contextAnalyzer";
 import { SessionSnapshot } from "./sessionMonitor";
 import {
   fmtTokens as sharedFmtTokens, fmtCost as sharedFmtCost,
@@ -408,6 +410,8 @@ function buildRingGaugeWithLabel(value: number, total: number, size: number, col
 function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): string {
   const d = compute(stats);
   const cacheView = cache ? buildCacheViewHTML(cache) : null;
+  const contextData = analyzeContext();
+  const contextView: ContextViewHTML | null = contextData ? buildContextViewHTML(contextData) : null;
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
   const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens + s.cacheWriteTokens + s.cacheReadTokens);
@@ -1506,6 +1510,7 @@ body::before {
 @media (max-width: 800px) { .live-grid { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 500px) { .live-grid { grid-template-columns: repeat(2, 1fr); } }
 ${cacheView ? cacheView.css : ""}
+${contextView ? contextView.css : ""}
 </style>
 </head>
 <body>
@@ -1522,10 +1527,11 @@ ${cacheView ? cacheView.css : ""}
     <div class="header-left">
       <div class="logo">C</div>
       <h1>Claude Usage Dashboard</h1>
-      ${cacheView ? `<div class="view-tabs" id="view-tabs">
+      <div class="view-tabs" id="view-tabs">
         <button class="view-tab active" data-view="usage">Usage</button>
-        <button class="view-tab" data-view="cache">Cache Health</button>
-      </div>` : ""}
+        ${cacheView ? `<button class="view-tab" data-view="cache">Cache Health</button>` : ""}
+        ${contextView ? `<button class="view-tab" data-view="context">Context</button>` : ""}
+      </div>
     </div>
     <div class="header-right">
       ${sub && sub.type !== "unknown" ? `<div class="sub-badge" style="color:${subInfo.color}; border-color:${subInfo.color}33">
@@ -1865,6 +1871,7 @@ ${cacheView ? cacheView.css : ""}
   </div><!-- /view-usage -->
 
   ${cacheView ? `<div id="view-cache" style="display:none">${cacheView.html}</div>` : ""}
+  ${contextView ? `<div id="view-context" style="display:none">${contextView.html}</div>` : ""}
 
 </div>
 
@@ -2670,23 +2677,26 @@ ${cacheView ? cacheView.css : ""}
   attachChartListeners();
 
   // ── View switching (Usage / Cache Health) ──
-  ${cacheView ? `
-  var CACHE_SESSIONS = ${cacheView.sessionData};
+  ${`
+  ${cacheView ? `var CACHE_SESSIONS = ${cacheView.sessionData};` : ""}
   var viewTabs = document.querySelectorAll('.view-tab');
   var viewUsage = document.getElementById('view-usage');
   var viewCache = document.getElementById('view-cache');
+  var viewContext = document.getElementById('view-context');
 
   viewTabs.forEach(function(tab) {
     tab.addEventListener('click', function() {
       var view = this.getAttribute('data-view');
       viewTabs.forEach(function(t) { t.classList.toggle('active', t.getAttribute('data-view') === view); });
       viewUsage.style.display = view === 'usage' ? '' : 'none';
-      viewCache.style.display = view === 'cache' ? '' : 'none';
+      if (viewCache) viewCache.style.display = view === 'cache' ? '' : 'none';
+      if (viewContext) viewContext.style.display = view === 'context' ? '' : 'none';
       if (view === 'cache') animateCacheSVGs();
     });
-  });
+  });`}
 
   function animateCacheSVGs() {
+    if (!viewCache) return;
     viewCache.querySelectorAll('.chart-line').forEach(function(line) {
       var len = line.getTotalLength ? line.getTotalLength() : 0;
       if (len > 0) { line.style.setProperty('--line-length', len + 'px'); line.style.animation = 'none'; line.offsetHeight; line.style.animation = ''; }
@@ -2694,7 +2704,7 @@ ${cacheView ? cacheView.css : ""}
     viewCache.querySelectorAll('.chart-area-fill').forEach(function(a) { a.style.animation = 'none'; a.offsetHeight; a.style.animation = ''; });
   }
 
-  // ── Cache helpers ──
+  ${cacheView ? `// ── Cache helpers ──
   function cacheStatusColor(s) { return s === 'healthy' ? '#a6e3a1' : s === 'warning' ? '#f9e2af' : '#f38ba8'; }
   function cacheRatioColor(r) { return r >= 0.8 ? '#a6e3a1' : r >= 0.4 ? '#f9e2af' : '#f38ba8'; }
 
