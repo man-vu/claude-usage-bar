@@ -127,6 +127,42 @@ function est(x: unknown): number {
 }
 
 /**
+ * Estimate tokens for a message content block more accurately.
+ * Extracts only the actual text content, ignoring JSON structure overhead.
+ * Thinking blocks are excluded (not sent to API in context).
+ */
+function estMessageBlock(block: Record<string, unknown>): number {
+  if (!block) return 0;
+  // Thinking blocks are NOT counted in context (output-only, not re-sent)
+  if (block.type === "thinking") return 0;
+  // Tool use: count the input parameters only, not the JSON wrapper
+  if (block.type === "tool_use") {
+    const inputStr = typeof block.input === "string" ? block.input : JSON.stringify(block.input ?? "");
+    // tool_use overhead: name + id + structure ≈ 30 tokens
+    return 30 + Math.ceil(inputStr.length / CHARS_PER_TOKEN);
+  }
+  // Tool result: count the content text only
+  if (block.type === "tool_result") {
+    const content = block.content;
+    if (typeof content === "string") return Math.ceil(content.length / CHARS_PER_TOKEN);
+    if (Array.isArray(content)) {
+      return (content as Record<string, unknown>[]).reduce((s: number, c) => {
+        if (typeof c === "string") return s + Math.ceil((c as string).length / CHARS_PER_TOKEN);
+        if (c.type === "text" && typeof c.text === "string") return s + Math.ceil((c.text as string).length / CHARS_PER_TOKEN);
+        return s + est(c);
+      }, 0);
+    }
+    return est(content);
+  }
+  // Text block: count text only
+  if (block.type === "text" && typeof block.text === "string") {
+    return Math.ceil(block.text.length / CHARS_PER_TOKEN);
+  }
+  // Fallback
+  return est(block);
+}
+
+/**
  * Encode a workspace path to match Claude Code's project directory naming.
  * e.g. "D:/projects/foo" → "D--projects-foo" (or "d--projects-foo")
  */
@@ -292,13 +328,24 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
     reserved: "#999999",
   };
 
-  categories.push({ name: "System prompt", tokens: 6300, color: COLORS.systemPrompt });
+  categories.push({ name: "System prompt", tokens: 6500, color: COLORS.systemPrompt });
 
+  // MCP tools: loaded tools have full schemas in context
   const mcpLoadedTokens = mcpTools.filter(t => t.isLoaded).reduce((s, t) => s + t.tokens, 0);
   if (mcpLoadedTokens) categories.push({ name: "MCP tools", tokens: mcpLoadedTokens, color: COLORS.mcpTools });
 
-  // Agent estimate
-  categories.push({ name: "Custom agents", tokens: 6500, color: COLORS.agents });
+  // Deferred MCP tools: tool names + short descriptions still in context as deferred index
+  const mcpDeferredNames = deferredNames.filter(n => n.startsWith("mcp__"));
+  const mcpDeferredTokens = mcpDeferredNames.reduce((s, n) => s + est(n) + 250, 0); // ~250 tokens per deferred tool schema stub
+  if (mcpDeferredTokens) categories.push({ name: "MCP tools (deferred)", tokens: mcpDeferredTokens, color: "#666666", isDeferred: true });
+
+  // Deferred system tools (builtin tools that are deferred via tool search)
+  const systemDeferredNames = deferredNames.filter(n => !n.startsWith("mcp__"));
+  const systemDeferredTokens = systemDeferredNames.reduce((s, n) => s + est(n) + 500, 0); // ~500 tokens per system tool
+  if (systemDeferredTokens) categories.push({ name: "System tools (deferred)", tokens: systemDeferredTokens, color: "#555555", isDeferred: true });
+
+  // Custom agents — use real /context's typical value of ~4.7k
+  categories.push({ name: "Custom agents", tokens: 4700, color: COLORS.agents });
 
   // Memory files
   const claudeDir = path.join(os.homedir(), ".claude");
@@ -321,11 +368,15 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
         try {
           if (!fs.statSync(path.join(skillsDir, d)).isDirectory()) continue;
           const skillFile = path.join(skillsDir, d, "SKILL.md");
-          let tokens = 50;
+          // Real /context counts only the skill frontmatter name + description line
+          // Average ~47 tokens per skill. Extract just the description if available.
+          let tokens = 47;
           try {
             const content = fs.readFileSync(skillFile, "utf8");
-            const fm = content.match(/^---[\s\S]*?---/);
-            tokens = fm ? est(fm[0]) : est(content.slice(0, 500));
+            const descMatch = content.match(/description:\s*["|']?(.+?)["|']?\s*\n/);
+            if (descMatch) {
+              tokens = Math.ceil((d.length + descMatch[1].length + 20) / CHARS_PER_TOKEN);
+            }
           } catch { /* no SKILL.md */ }
           skills.push({ name: d, tokens, source: "User" });
           totalSkillTokens += tokens;
@@ -349,11 +400,13 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
                 try {
                   if (!fs.existsSync(skillsSubdir)) continue;
                   for (const s of fs.readdirSync(skillsSubdir).filter(f => f.endsWith(".md"))) {
-                    let tokens = 30;
+                    let tokens = 47;
                     try {
                       const content = fs.readFileSync(path.join(skillsSubdir, s), "utf8");
-                      const fm = content.match(/^---[\s\S]*?---/);
-                      tokens = fm ? est(fm[0]) : est(content.slice(0, 300));
+                      const descMatch = content.match(/description:\s*["|']?(.+?)["|']?\s*\n/);
+                      if (descMatch) {
+                        tokens = Math.ceil((s.length + descMatch[1].length + 20) / CHARS_PER_TOKEN);
+                      }
                     } catch { /* skip */ }
                     skills.push({ name: `${plugin}:${s.replace(/\.md$/, "")}`, tokens, source: "Plugin" });
                     totalSkillTokens += tokens;
@@ -369,6 +422,7 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
   if (totalSkillTokens) categories.push({ name: "Skills", tokens: totalSkillTokens, color: COLORS.skills });
 
   // Messages + tool usage
+  // Use estMessageBlock for accurate counting (strips JSON overhead, skips thinking)
   let msgTokens = 0;
   const toolMap = new Map<string, ToolUsage>();
   active.forEach(m => {
@@ -376,7 +430,7 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
       const arr = Array.isArray(m.message.content) ? m.message.content : [m.message.content];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       arr.forEach((b: any) => {
-        const t = est(b);
+        const t = estMessageBlock(b);
         msgTokens += t;
         if (b.type === "tool_use") {
           const n: string = b.name ?? "unknown";
@@ -390,7 +444,7 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
       const arr = Array.isArray(m.message.content) ? m.message.content : [{ text: m.message.content }];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       arr.forEach((b: any) => {
-        const t = est(b.content ?? b.text ?? b);
+        const t = estMessageBlock(b);
         msgTokens += t;
         if (b.type === "tool_result") {
           for (let j = msgs.length - 1; j >= 0; j--) {
