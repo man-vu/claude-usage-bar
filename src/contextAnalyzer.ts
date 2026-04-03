@@ -468,16 +468,24 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
       });
     }
   });
-  // If we have actual API usage, derive message tokens from the authoritative input_tokens.
-  // The API's input_tokens includes everything the model sees (system prompt, tools, messages).
-  // Subtract known non-message categories to get the true message token count.
-  if (apiUsage && apiUsage.input_tokens > 0) {
-    const apiTotal = apiUsage.input_tokens + (apiUsage.cache_read_input_tokens ?? 0) + (apiUsage.cache_creation_input_tokens ?? 0);
-    const nonMessageTokens = categories.reduce((s, c) => s + (c.isDeferred ? 0 : c.tokens), 0);
-    const derivedMsgTokens = Math.max(0, apiTotal - nonMessageTokens);
-    if (msgTokens) categories.push({ name: "Messages", tokens: derivedMsgTokens, color: COLORS.messages });
-  } else {
-    if (msgTokens) categories.push({ name: "Messages", tokens: msgTokens, color: COLORS.messages });
+  // Derive message tokens from API data when available.
+  // The API's input_tokens is the authoritative context size — subtract non-message
+  // categories to get the true message count. When no API data, apply a calibration
+  // factor (chars/4 overestimates by ~2x vs real tokenizer for JSON-heavy content).
+  const ESTIMATION_CALIBRATION = 0.45; // empirically: real tokens ≈ 45% of chars/4 estimate
+
+  if (apiUsage) {
+    const apiTotal = (apiUsage.input_tokens ?? 0) + (apiUsage.cache_read_input_tokens ?? 0) + (apiUsage.cache_creation_input_tokens ?? 0);
+    if (apiTotal > 0) {
+      const nonMessageTokens = categories.reduce((s, c) => s + (c.isDeferred ? 0 : c.tokens), 0);
+      const derivedMsgTokens = Math.max(0, apiTotal - nonMessageTokens);
+      if (msgTokens) categories.push({ name: "Messages", tokens: derivedMsgTokens, color: COLORS.messages });
+    } else if (msgTokens) {
+      categories.push({ name: "Messages", tokens: Math.round(msgTokens * ESTIMATION_CALIBRATION), color: COLORS.messages });
+    }
+  } else if (msgTokens) {
+    // No API data at all — use calibrated estimation
+    categories.push({ name: "Messages", tokens: Math.round(msgTokens * ESTIMATION_CALIBRATION), color: COLORS.messages });
   }
 
   // Reserved
