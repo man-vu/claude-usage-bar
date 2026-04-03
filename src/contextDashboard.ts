@@ -77,7 +77,10 @@ function buildGridHTML(d: ContextAnalysis): string {
     const cells: string[] = [];
     for (let c = 0; c < d.gridWidth; c++) {
       const sq = d.gridSquares[r * d.gridWidth + c];
-      cells.push(`<span class="ctx-sq" style="color:${sq.color}" title="${sq.name}">${sq.symbol}</span>`);
+      const isFree = sq.name === "Free space";
+      const isReserved = sq.name === "Autocompact buffer";
+      const cls = isFree ? "ctx-sq ctx-sq-free" : isReserved ? "ctx-sq ctx-sq-reserved" : "ctx-sq ctx-sq-filled";
+      cells.push(`<div class="${cls}" style="--sq-color:${sq.color}" title="${sq.name}"></div>`);
     }
     rows.push(`<div class="ctx-grid-row">${cells.join("")}</div>`);
   }
@@ -184,9 +187,13 @@ export function buildContextViewHTML(d: ContextAnalysis): ContextViewHTML {
 .ctx-kpi-label { color: var(--text-tertiary); margin-left: 4px; }
 
 .ctx-grid-section { padding: 20px 24px; }
-.ctx-grid-row { line-height: 1.6; white-space: nowrap; letter-spacing: 1px; }
-.ctx-sq { font-size: 14px; cursor: default; transition: transform 0.15s; }
-.ctx-sq:hover { transform: scale(1.3); }
+.ctx-grid-row { display: flex; gap: 3px; margin-bottom: 3px; }
+.ctx-sq { width: 18px; height: 18px; border-radius: 3px; cursor: default; transition: transform 0.15s, box-shadow 0.2s; }
+.ctx-sq:hover { transform: scale(1.25); z-index: 1; }
+.ctx-sq-filled { background: var(--sq-color); box-shadow: 0 0 6px color-mix(in srgb, var(--sq-color) 40%, transparent); }
+.ctx-sq-filled:hover { box-shadow: 0 0 12px color-mix(in srgb, var(--sq-color) 60%, transparent); }
+.ctx-sq-free { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.04); }
+.ctx-sq-reserved { background: repeating-linear-gradient(45deg, rgba(255,255,255,0.04), rgba(255,255,255,0.04) 2px, rgba(255,255,255,0.08) 2px, rgba(255,255,255,0.08) 4px); border: 1px solid rgba(255,255,255,0.06); }
 
 .ctx-cats { padding: 0 24px 20px; }
 .ctx-cat-row { display: grid; grid-template-columns: 160px 1fr 70px 50px; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
