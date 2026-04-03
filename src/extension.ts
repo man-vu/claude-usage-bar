@@ -9,6 +9,7 @@ import { scanConversations, scanToday, DailyStats } from "./scanner";
 import { DashboardPanel, SubscriptionInfo } from "./dashboard";
 import { analyzeCacheHealth } from "./cacheAnalyzer";
 import { SessionMonitor, SessionSnapshot } from "./sessionMonitor";
+import { ContextViewPanel } from "./contextView";
 
 let statusBar: StatusBarManager;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -172,8 +173,13 @@ export function activate(context: vscode.ExtensionContext): void {
     () => refreshLocalStats()
   );
 
+  const contextViewCmd = vscode.commands.registerCommand(
+    "claudeUsageBar.showContextView",
+    () => ContextViewPanel.show(context)
+  );
+
   context.subscriptions.push(
-    refreshCmd, toggleCmd, dashboardCmd, refreshDashboardCmd, scanCmd,
+    refreshCmd, toggleCmd, dashboardCmd, refreshDashboardCmd, scanCmd, contextViewCmd,
     statusBar, outputChannel
   );
 
