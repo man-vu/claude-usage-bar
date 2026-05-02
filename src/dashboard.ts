@@ -446,7 +446,7 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageDat
   const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens + s.cacheWriteTokens + s.cacheReadTokens);
 
   const changeIcon = d.costChange > 0 ? "&#9650;" : d.costChange < 0 ? "&#9660;" : "&#8226;";
-  const changeColor = d.costChange > 0 ? "#f38ba8" : d.costChange < 0 ? "#a6e3a1" : "rgba(255,255,255,0.4)";
+  const changeColor = d.costChange > 0 ? "#f38ba8" : d.costChange < 0 ? "#a6e3a1" : "var(--text-tertiary)";
   const changeText = d.costChange !== 0 ? `${Math.abs(d.costChange).toFixed(0)}% vs yesterday` : "same as yesterday";
 
   const modelColors = ["#89b4fa", "#a6e3a1", "#fab387", "#f38ba8", "#f9e2af", "#cba6f7", "#94e2d5"];
@@ -527,29 +527,39 @@ function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageDat
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Usage Dashboard</title>
 <style>
-/* ── Design tokens ── */
+/* ── Design tokens (mapped to VS Code theme) ── */
 :root {
-  --bg-base: #0f0f1a;
-  --bg-surface: rgba(30, 30, 52, 0.65);
-  --bg-surface-hover: rgba(40, 40, 70, 0.8);
-  --bg-elevated: rgba(50, 50, 85, 0.45);
-  --text-primary: #e2e8f0;
-  --text-secondary: rgba(255, 255, 255, 0.5);
-  --text-tertiary: rgba(255, 255, 255, 0.3);
-  --border: rgba(255, 255, 255, 0.06);
-  --border-subtle: rgba(255, 255, 255, 0.03);
-  --accent-blue: #89b4fa;
-  --accent-green: #a6e3a1;
-  --accent-peach: #fab387;
-  --accent-red: #f38ba8;
-  --accent-yellow: #f9e2af;
-  --accent-purple: #cba6f7;
-  --accent-teal: #94e2d5;
-  --glow-blue: rgba(137, 180, 250, 0.15);
+  --bg-base: var(--vscode-editor-background, #0f0f1a);
+  --bg-surface: color-mix(in srgb, var(--vscode-foreground, #e2e8f0) 4%, var(--vscode-editor-background, #1e1e34));
+  --bg-surface-hover: color-mix(in srgb, var(--vscode-foreground, #e2e8f0) 8%, var(--vscode-editor-background, #1e1e34));
+  --bg-elevated: color-mix(in srgb, var(--vscode-foreground, #e2e8f0) 6%, var(--vscode-editor-background, #1e1e34));
+  --text-primary: var(--vscode-foreground, #e2e8f0);
+  --text-secondary: var(--vscode-descriptionForeground, color-mix(in srgb, var(--vscode-foreground, #e2e8f0) 70%, transparent));
+  --text-tertiary: color-mix(in srgb, var(--vscode-foreground, #e2e8f0) 50%, transparent);
+  --border: var(--vscode-panel-border, color-mix(in srgb, var(--vscode-foreground, #fff) 10%, transparent));
+  --border-subtle: color-mix(in srgb, var(--vscode-foreground, #fff) 6%, transparent);
+  --accent-blue: var(--vscode-charts-blue, #89b4fa);
+  --accent-green: var(--vscode-charts-green, #a6e3a1);
+  --accent-peach: var(--vscode-charts-orange, #fab387);
+  --accent-red: var(--vscode-charts-red, #f38ba8);
+  --accent-yellow: var(--vscode-charts-yellow, #f9e2af);
+  --accent-purple: var(--vscode-charts-purple, #cba6f7);
+  --accent-teal: var(--vscode-symbolIcon-colorForeground, #94e2d5);
+  --glow-blue: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+  /* Theme-aware surface tints (replace hardcoded rgba(255,255,255,X)) */
+  --surface-1: color-mix(in srgb, var(--vscode-foreground, #fff) 3%, transparent);
+  --surface-2: color-mix(in srgb, var(--vscode-foreground, #fff) 5%, transparent);
+  --surface-3: color-mix(in srgb, var(--vscode-foreground, #fff) 8%, transparent);
+  --surface-4: color-mix(in srgb, var(--vscode-foreground, #fff) 12%, transparent);
+  --surface-5: color-mix(in srgb, var(--vscode-foreground, #fff) 18%, transparent);
   --radius: 16px;
   --radius-sm: 10px;
   --radius-xs: 6px;
 }
+
+/* Override chart SVG fills/strokes that hardcode white rgba */
+svg [fill^="rgba(255,255,255"] { fill: var(--text-tertiary) !important; }
+svg [stroke^="rgba(255,255,255"] { stroke: var(--border) !important; }
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -623,8 +633,8 @@ body::before {
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.06em;
-  border: 1px solid rgba(255,255,255,0.1);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--surface-3);
+  background: var(--surface-2);
   backdrop-filter: blur(8px);
 }
 .sub-dot {
@@ -704,7 +714,7 @@ body::before {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .card:hover {
-  border-color: rgba(255,255,255,0.1);
+  border-color: var(--surface-3);
   box-shadow: 0 8px 32px rgba(0,0,0,0.2);
 }
 
@@ -728,7 +738,7 @@ body::before {
   animation: fadeUp 0.4s ease-out both;
 }
 .rate-limit-card:hover {
-  border-color: rgba(255,255,255,0.1);
+  border-color: var(--surface-3);
   box-shadow: 0 8px 32px rgba(0,0,0,0.2);
 }
 .rl-gauge {
@@ -748,7 +758,7 @@ body::before {
 }
 .rl-bar-bg {
   height: 8px;
-  background: rgba(255,255,255,0.06);
+  background: var(--surface-2);
   border-radius: 4px;
   overflow: hidden;
   margin-bottom: 4px;
@@ -844,7 +854,7 @@ body::before {
   font-size: 0.7rem;
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(255,255,255,0.05);
+  background: var(--surface-2);
 }
 .kpi-sparkline {
   flex-shrink: 0;
@@ -873,7 +883,7 @@ body::before {
 }
 .kpi-model-bar-bg {
   height: 6px;
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -1018,7 +1028,7 @@ body::before {
 .cache-stat {
   text-align: center;
   padding: 14px 8px;
-  background: rgba(255,255,255,0.02);
+  background: var(--surface-1);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
 }
@@ -1046,7 +1056,7 @@ body::before {
   background: rgba(15, 15, 30, 0.92);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255,255,255,0.12);
+  border: 1px solid var(--surface-4);
   border-radius: 10px;
   padding: 10px 14px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(137,180,250,0.08);
@@ -1077,7 +1087,7 @@ body::before {
 .data-dot { transition: r 0.15s, filter 0.15s; cursor: pointer; }
 .data-dot:hover { r: 7; filter: drop-shadow(0 0 6px rgba(137,180,250,0.6)); }
 .donut-segment { transition: opacity 0.15s, filter 0.15s; cursor: pointer; }
-.donut-segment:hover { opacity: 1 !important; filter: drop-shadow(0 0 8px rgba(255,255,255,0.15)); }
+.donut-segment:hover { opacity: 1 !important; filter: drop-shadow(0 0 8px var(--surface-5)); }
 
 /* ── Chart draw animations ── */
 @keyframes lineDrawIn {
@@ -1109,7 +1119,7 @@ body::before {
   align-items: center;
   gap: 4px;
   padding: 3px;
-  background: rgba(255,255,255,0.03);
+  background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 8px;
   width: fit-content;
@@ -1131,7 +1141,7 @@ body::before {
 }
 .period-tab:hover {
   color: var(--text-secondary);
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
 }
 .period-tab.active {
   color: var(--text-primary);
@@ -1161,7 +1171,7 @@ body::before {
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 4px;
-  background: rgba(255,255,255,0.05);
+  background: var(--surface-2);
 }
 .period-meta {
   font-size: 0.72rem;
@@ -1174,7 +1184,7 @@ body::before {
   align-items: center;
   gap: 2px;
   padding: 2px;
-  background: rgba(255,255,255,0.03);
+  background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 6px;
 }
@@ -1195,7 +1205,7 @@ body::before {
 }
 .chart-mode-tab:hover {
   color: var(--text-secondary);
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
 }
 .chart-mode-tab.active {
   color: var(--text-primary);
@@ -1358,7 +1368,7 @@ body::before {
   border-radius: 4px;
   transition: background 0.15s;
 }
-.tool-row:hover { background: rgba(255,255,255,0.03); }
+.tool-row:hover { background: var(--surface-1); }
 .tool-name {
   font-size: 0.72rem;
   font-weight: 500;
@@ -1369,7 +1379,7 @@ body::before {
 }
 .tool-bar-bg {
   height: 5px;
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -1438,7 +1448,7 @@ body::before {
   transition: background 0.15s;
 }
 .project-row:last-child { border-bottom: none; }
-.project-row:hover { background: rgba(255,255,255,0.02); }
+.project-row:hover { background: var(--surface-1); }
 .project-info { min-width: 0; }
 .project-name {
   font-size: 0.78rem;
@@ -1451,7 +1461,7 @@ body::before {
 .project-bar-inline {
   height: 5px;
   margin-top: 4px;
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -1473,7 +1483,7 @@ body::before {
   font-weight: 600;
   font-family: inherit;
   color: var(--text-secondary);
-  background: rgba(255,255,255,0.04);
+  background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 5px;
   cursor: pointer;
@@ -1789,7 +1799,7 @@ body::before {
         ${d.totalHourlyActivity.map((count, h) => {
           const intensity = maxHourly > 0 ? count / maxHourly : 0;
           const bg = count === 0
-            ? "rgba(255,255,255,0.03)"
+            ? "var(--surface-1)"
             : `rgba(137,180,250,${0.15 + intensity * 0.85})`;
           return `<div class="heatmap-cell" style="background:${bg}" data-tip-date="${String(h).padStart(2, "0")}:00 – ${String(h).padStart(2, "0")}:59" data-tip-cost="${count} messages" data-tip-msgs="" data-tip-tokens=""></div>`;
         }).join("\n")}
@@ -1800,7 +1810,7 @@ body::before {
       <div class="heatmap-footer">
         <span>Less</span>
         <div class="heatmap-legend">
-          <div class="heatmap-legend-cell" style="background:rgba(255,255,255,0.03)"></div>
+          <div class="heatmap-legend-cell" style="background:var(--surface-1)"></div>
           <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.25)"></div>
           <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.5)"></div>
           <div class="heatmap-legend-cell" style="background:rgba(137,180,250,0.75)"></div>
@@ -2305,7 +2315,7 @@ body::before {
         compLabel = 'vs yesterday';
       } else if (period === 0) {
         // All time — no comparison
-        changeEl.style.color = 'rgba(255,255,255,0.4)';
+        changeEl.style.color = 'var(--text-tertiary)';
         changeEl.textContent = agg.daysWithData + ' days tracked';
         currentTotal = 0; prevTotal = 0; // skip change calc
       } else {
@@ -2324,13 +2334,13 @@ body::before {
         if (prevTotal > 0) {
           var costChange = ((currentTotal - prevTotal) / prevTotal) * 100;
           var changeIcon = costChange > 0 ? '\u25B2' : costChange < 0 ? '\u25BC' : '\u2022';
-          var changeColor = costChange > 0 ? '#f38ba8' : costChange < 0 ? '#a6e3a1' : 'rgba(255,255,255,0.4)';
+          var changeColor = costChange > 0 ? '#f38ba8' : costChange < 0 ? '#a6e3a1' : 'var(--text-tertiary)';
           var changeText = costChange !== 0 ? Math.abs(costChange).toFixed(0) + '% ' + compLabel : 'no change';
           changeEl.style.color = changeColor;
           changeEl.textContent = changeIcon + ' ' + changeText;
         } else {
           // No previous period data to compare
-          changeEl.style.color = 'rgba(255,255,255,0.4)';
+          changeEl.style.color = 'var(--text-tertiary)';
           changeEl.textContent = '\u2022 no prior data';
         }
       }
@@ -2407,7 +2417,7 @@ body::before {
       if (sessionsBadge) sessionsBadge.textContent = agg.totalSessions + ' sessions';
       heatmapGrid.innerHTML = agg.hourlyActivity.map(function(count, h) {
         var intensity = maxHourly > 0 ? count / maxHourly : 0;
-        var bg = count === 0 ? 'rgba(255,255,255,0.03)' : 'rgba(137,180,250,' + (0.15 + intensity * 0.85) + ')';
+        var bg = count === 0 ? 'var(--surface-1)' : 'rgba(137,180,250,' + (0.15 + intensity * 0.85) + ')';
         return '<div class="heatmap-cell" style="background:' + bg + '" data-tip-date="' + String(h).padStart(2, '0') + ':00 \u2013 ' + String(h).padStart(2, '0') + ':59" data-tip-cost="' + count + ' messages" data-tip-msgs="" data-tip-tokens=""></div>';
       }).join('');
     }
@@ -2516,7 +2526,7 @@ body::before {
         if (p.models && p.models.length > 0) {
           var modelColors = ['#89b4fa','#a6e3a1','#fab387','#f38ba8','#f9e2af','#cba6f7','#94e2d5'];
           var sep = document.createElement('div');
-          sep.style.cssText = 'border-top:1px solid rgba(255,255,255,0.08);margin:5px 0 3px;';
+          sep.style.cssText = 'border-top:1px solid var(--surface-3);margin:5px 0 3px;';
           tipRows.appendChild(sep);
           p.models.forEach(function(model, mi) {
             var row = document.createElement('div');
