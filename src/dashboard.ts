@@ -1,6 +1,18 @@
 import * as vscode from "vscode";
 import { DailyStats } from "./scanner";
 import { UsageData } from "./api";
+import { CacheAnalysisResult } from "./cacheAnalyzer";
+import { buildCacheViewHTML } from "./cacheDashboard";
+import { buildContextViewHTML, ContextViewHTML } from "./contextDashboard";
+import { analyzeContext } from "./contextAnalyzer";
+import { SessionSnapshot } from "./sessionMonitor";
+import {
+  fmtTokens as sharedFmtTokens, fmtCost as sharedFmtCost,
+  fmtModel as sharedFmtModel, fmtDate as sharedFmtDate,
+  fmtDateShort as sharedFmtDateShort,
+  smoothPathTS as sharedSmoothPath, smoothAreaTS as sharedSmoothArea,
+  buildRingGauge as sharedBuildRingGauge,
+} from "./shared";
 
 export interface SubscriptionInfo {
   type: string;  // "max", "pro", "free", "unknown"
@@ -29,10 +41,10 @@ export class DashboardPanel {
     );
   }
 
-  static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): DashboardPanel {
+  static show(context: vscode.ExtensionContext, stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): DashboardPanel {
     if (DashboardPanel.instance) {
       DashboardPanel.instance.panel.reveal(vscode.ViewColumn.One);
-      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
+      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime, cache);
       return DashboardPanel.instance;
     }
 
@@ -44,18 +56,25 @@ export class DashboardPanel {
     );
 
     DashboardPanel.instance = new DashboardPanel(panel);
-    DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
+    DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime, cache);
     return DashboardPanel.instance;
   }
 
-  updateContent(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): void {
-    this.panel.webview.html = buildHtml(stats, sub, usage, lastFetchTime);
+  updateContent(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): void {
+    this.panel.webview.html = buildHtml(stats, sub, usage, lastFetchTime, cache);
   }
 
   /** Update the open dashboard if it exists, without revealing it. */
-  static updateIfOpen(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): void {
+  static updateIfOpen(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): void {
     if (DashboardPanel.instance) {
-      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime);
+      DashboardPanel.instance.updateContent(stats, sub, usage, lastFetchTime, cache);
+    }
+  }
+
+  /** Push a live session snapshot to the webview. */
+  static postSessionUpdate(snap: SessionSnapshot): void {
+    if (DashboardPanel.instance) {
+      DashboardPanel.instance.panel.webview.postMessage({ type: "sessionUpdate", data: snap });
     }
   }
 
@@ -63,8 +82,19 @@ export class DashboardPanel {
     return DashboardPanel.instance !== undefined;
   }
 
+  private static onDisposeCallback: (() => void) | undefined;
+
+  /** Register a callback to run when the panel is disposed (e.g. to stop monitors). */
+  static onDispose(cb: () => void): void {
+    DashboardPanel.onDisposeCallback = cb;
+  }
+
   private dispose(): void {
     DashboardPanel.instance = undefined;
+    if (DashboardPanel.onDisposeCallback) {
+      DashboardPanel.onDisposeCallback();
+      DashboardPanel.onDisposeCallback = undefined;
+    }
     this.panel.dispose();
     for (const d of this.disposables) {
       d.dispose();
@@ -172,70 +202,14 @@ function compute(stats: DailyStats[]): ComputedData {
   return { today, yesterday, stats, totalCost, totalMessages, totalInput, totalOutput, totalCacheWrite, totalCacheRead, avgDailyCost, costChange, modelTotals, peakDay, cacheSavings, totalToolUsage, totalHourlyActivity, totalSessions, totalProjectBreakdown };
 }
 
-// ── Formatters ────────────────────────────────────────────────────────
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
-  return n.toString();
-}
-
-function fmtCost(n: number): string {
-  return n < 10 ? `$${n.toFixed(2)}` : `$${n.toFixed(1)}`;
-}
-
-function fmtModel(model: string): string {
-  // "claude-opus-4-6" → "Opus 4.6"
-  // "claude-haiku-4-5" → "Haiku 4.5"
-  const stripped = model.replace("claude-", "").replace(/-\d{8,}$/, "");
-  const match = stripped.match(/^(\w+)-(\d+)-(\d+)$/);
-  if (match) {
-    return match[1].charAt(0).toUpperCase() + match[1].slice(1) + " " + match[2] + "." + match[3];
-  }
-  // fallback
-  return stripped.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
-function fmtDate(d: string): string {
-  const dt = new Date(d + "T00:00:00");
-  return dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
-}
-
-function fmtDateShort(d: string): string {
-  const dt = new Date(d + "T00:00:00");
-  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-// ── Catmull-Rom to cubic bezier smooth path (server-side) ─────────────
-function smoothPathTS(pts: { x: number; y: number }[], minY?: number, maxY?: number): string {
-  if (pts.length < 2) return "";
-  if (pts.length === 2) return `M${pts[0].x},${pts[0].y} L${pts[1].x},${pts[1].y}`;
-  const clamp = (y: number, segMinY: number, segMaxY: number) => {
-    let v = y;
-    if (minY !== undefined && v < minY) v = minY;
-    if (maxY !== undefined && v > maxY) v = maxY;
-    // Also clamp to segment endpoint range to prevent overshoot
-    v = Math.max(Math.min(segMinY, segMaxY), Math.min(Math.max(segMinY, segMaxY), v));
-    return v;
-  };
-  let d = `M${pts[0].x},${pts[0].y}`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[i === 0 ? 0 : i - 1];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = pts[i + 2 < pts.length ? i + 2 : pts.length - 1];
-    const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = clamp(p1.y + (p2.y - p0.y) / 6, p1.y, p2.y);
-    const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = clamp(p2.y - (p3.y - p1.y) / 6, p1.y, p2.y);
-    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
-  }
-  return d;
-}
-function smoothAreaTS(pts: { x: number; y: number }[], baseY: number, minY?: number): string {
-  if (pts.length < 2) return "";
-  return smoothPathTS(pts, minY, baseY) + ` L${pts[pts.length - 1].x},${baseY} L${pts[0].x},${baseY} Z`;
-}
+// ── Re-export shared formatters/helpers under local names for compatibility ──
+const fmtTokens = sharedFmtTokens;
+const fmtCost = sharedFmtCost;
+const fmtModel = sharedFmtModel;
+const fmtDate = sharedFmtDate;
+const fmtDateShort = sharedFmtDateShort;
+const smoothPathTS = sharedSmoothPath;
+const smoothAreaTS = sharedSmoothArea;
 
 // ── SVG Charts (with data attributes for JS tooltips) ─────────────────
 
@@ -420,27 +394,25 @@ function buildSparkline(values: number[], w: number, h: number, color: string): 
   </svg>`;
 }
 
-function buildRingGauge(value: number, total: number, size: number, color: string, bgColor: string = "rgba(255,255,255,0.06)"): string {
-  const r = (size - 6) / 2;
-  const cx = size / 2, cy = size / 2;
-  const circumference = 2 * Math.PI * r;
+/** Ring gauge with embedded percentage text (wraps shared buildRingGauge). */
+function buildRingGaugeWithLabel(value: number, total: number, size: number, color: string): string {
   const pct = total > 0 ? value / total : 0;
-  const dashOffset = circumference * (1 - pct);
-
-  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" class="token-gauge-ring">
-    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${bgColor}" stroke-width="5"/>
-    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="5"
-      stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}"
-      stroke-linecap="round" transform="rotate(-90 ${cx} ${cy})"
-      style="transition: stroke-dashoffset 0.6s ease"/>
-    <text x="${cx}" y="${cy + 3}" text-anchor="middle" fill="${color}" font-size="9" font-weight="700">${total > 0 ? (pct * 100).toFixed(0) : 0}%</text>
-  </svg>`;
+  const cx = size / 2, cy = size / 2;
+  // Use shared gauge + overlay text
+  return sharedBuildRingGauge(pct, size, color).replace(
+    "</svg>",
+    `<text x="${cx}" y="${cy + 3}" text-anchor="middle" fill="${color}" font-size="9" font-weight="700">${(pct * 100).toFixed(0)}%</text></svg>`
+  );
 }
 
 // ── Main HTML builder ─────────────────────────────────────────────────
 
-function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null): string {
+function buildHtml(stats: DailyStats[], sub?: SubscriptionInfo, usage?: UsageData, lastFetchTime?: number | null, cache?: CacheAnalysisResult): string {
   const d = compute(stats);
+  const cacheView = cache ? buildCacheViewHTML(cache) : null;
+  const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const contextData = analyzeContext(wsPath);
+  const contextView: ContextViewHTML | null = contextData ? buildContextViewHTML(contextData) : null;
   const chartDays = d.stats.slice().sort((a, b) => a.date.localeCompare(b.date));
   const costSparkValues = chartDays.map(s => s.totalCost);
   const tokenSparkValues = chartDays.map(s => s.inputTokens + s.outputTokens + s.cacheWriteTokens + s.cacheReadTokens);
@@ -1514,6 +1486,32 @@ body::before {
   gap: 14px;
   margin-bottom: 14px;
 }
+/* ── Live Session Monitor ── */
+.live-session {
+  background: linear-gradient(135deg, rgba(166,227,161,0.06), rgba(137,180,250,0.04));
+  border: 1px solid rgba(166,227,161,0.15);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  margin-bottom: 14px;
+  animation: fadeUp 0.3s ease-out both;
+}
+.live-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.live-title { display: flex; align-items: center; gap: 10px; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; animation: pulse-dot 1.5s ease-in-out infinite; }
+.live-title-text { font-size: 0.85rem; font-weight: 700; color: var(--text-primary); }
+.live-meta { font-size: 0.68rem; color: var(--text-tertiary); }
+.live-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+.live-stat { text-align: center; }
+.live-stat-val { font-size: 1.15rem; font-weight: 800; letter-spacing: -0.02em; line-height: 1.2; }
+.live-stat-label { font-size: 0.58rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-tertiary); margin-top: 3px; }
+.live-sparkline-row { display: flex; align-items: center; gap: 16px; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.04); }
+.live-sparkline-label { font-size: 0.65rem; font-weight: 600; color: var(--text-tertiary); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.05em; }
+.live-sparkline { flex: 1; height: 32px; }
+.live-waiting { text-align: center; padding: 8px; font-size: 0.75rem; color: var(--text-tertiary); }
+@media (max-width: 800px) { .live-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 500px) { .live-grid { grid-template-columns: repeat(2, 1fr); } }
+${cacheView ? cacheView.css : ""}
+${contextView ? contextView.css : ""}
 </style>
 </head>
 <body>
@@ -1530,6 +1528,11 @@ body::before {
     <div class="header-left">
       <div class="logo">C</div>
       <h1>Claude Usage Dashboard</h1>
+      <div class="view-tabs" id="view-tabs">
+        <button class="view-tab active" data-view="usage">Usage</button>
+        ${cacheView ? `<button class="view-tab" data-view="cache">Cache Health</button>` : ""}
+        ${contextView ? `<button class="view-tab" data-view="context">Context</button>` : ""}
+      </div>
     </div>
     <div class="header-right">
       ${sub && sub.type !== "unknown" ? `<div class="sub-badge" style="color:${subInfo.color}; border-color:${subInfo.color}33">
@@ -1543,6 +1546,52 @@ body::before {
       <div class="header-meta">
         <span id="header-period-label">Last 7 days</span> &middot; ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </div>
+    </div>
+  </div>
+
+  <div id="view-usage">
+
+  <!-- Live Session Monitor -->
+  <div class="live-session" id="live-session">
+    <div class="live-header">
+      <div class="live-title">
+        <div class="live-dot" id="live-dot"></div>
+        <span class="live-title-text">Live Session</span>
+        <span style="font-size:0.68rem;color:var(--text-tertiary)" id="live-project"></span>
+      </div>
+      <div class="live-meta" id="live-elapsed"></div>
+    </div>
+    <div class="live-grid">
+      <div class="live-stat">
+        <div class="live-stat-val" style="color:var(--accent-green)" id="live-cost">-</div>
+        <div class="live-stat-label">Cost</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-val" style="color:var(--accent-blue)" id="live-msgs">-</div>
+        <div class="live-stat-label">Messages</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-val" style="color:var(--accent-peach)" id="live-input">-</div>
+        <div class="live-stat-label">Input</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-val" style="color:var(--accent-peach)" id="live-output">-</div>
+        <div class="live-stat-label">Output</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-val" id="live-cache-rate" style="color:var(--accent-teal)">-</div>
+        <div class="live-stat-label">Cache Hit</div>
+      </div>
+      <div class="live-stat">
+        <div class="live-stat-val" style="color:var(--accent-teal)" id="live-cache-read">-</div>
+        <div class="live-stat-label">Cache Read</div>
+      </div>
+    </div>
+    <div class="live-sparkline-row" id="live-sparkline-row" style="display:none">
+      <span class="live-sparkline-label">Cache %/turn</span>
+      <div class="live-sparkline" id="live-sparkline-cache"></div>
+      <span class="live-sparkline-label">Cost</span>
+      <div class="live-sparkline" id="live-sparkline-cost"></div>
     </div>
   </div>
 
@@ -1635,21 +1684,21 @@ body::before {
       </div>
       <div class="token-gauges">
         <div class="token-gauge">
-          ${buildRingGauge(d.today.inputTokens, todayIOTokens, 48, "#89b4fa")}
+          ${buildRingGaugeWithLabel(d.today.inputTokens, todayIOTokens, 48, "#89b4fa")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Input</div>
             <div class="token-gauge-val">${fmtTokens(d.today.inputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(d.today.outputTokens, todayIOTokens, 48, "#a6e3a1")}
+          ${buildRingGaugeWithLabel(d.today.outputTokens, todayIOTokens, 48, "#a6e3a1")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Output</div>
             <div class="token-gauge-val">${fmtTokens(d.today.outputTokens)}</div>
           </div>
         </div>
         <div class="token-gauge">
-          ${buildRingGauge(d.today.cacheReadTokens, todayCacheTotal, 48, "#94e2d5")}
+          ${buildRingGaugeWithLabel(d.today.cacheReadTokens, todayCacheTotal, 48, "#94e2d5")}
           <div class="token-gauge-info">
             <div class="token-gauge-label">Cache</div>
             <div class="token-gauge-val">${fmtTokens(todayCacheTotal)}</div>
@@ -1820,6 +1869,10 @@ body::before {
       <a class="donate-btn" href="https://buymeacoffee.com/manvu" target="_blank">&#9749; Buy me a coffee</a>
     </div>
   </div>
+  </div><!-- /view-usage -->
+
+  ${cacheView ? `<div id="view-cache" style="display:none">${cacheView.html}</div>` : ""}
+  ${contextView ? `<div id="view-context" style="display:none">${contextView.html}</div>` : ""}
 
 </div>
 
@@ -2620,6 +2673,337 @@ body::before {
       (acquireVsCodeApi()).postMessage({command:'refresh'});
     });
   }
+
+  // ── Initial chart listeners ──
+  attachChartListeners();
+
+  // ── View switching (Usage / Cache Health) ──
+  ${`
+  ${cacheView ? `var CACHE_SESSIONS = ${cacheView.sessionData};` : ""}
+  var viewTabs = document.querySelectorAll('.view-tab');
+  var viewUsage = document.getElementById('view-usage');
+  var viewCache = document.getElementById('view-cache');
+  var viewContext = document.getElementById('view-context');
+
+  viewTabs.forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var view = this.getAttribute('data-view');
+      viewTabs.forEach(function(t) { t.classList.toggle('active', t.getAttribute('data-view') === view); });
+      viewUsage.style.display = view === 'usage' ? '' : 'none';
+      if (viewCache) viewCache.style.display = view === 'cache' ? '' : 'none';
+      if (viewContext) viewContext.style.display = view === 'context' ? '' : 'none';
+      if (view === 'cache') animateCacheSVGs();
+    });
+  });`}
+
+  function animateCacheSVGs() {
+    if (!viewCache) return;
+    viewCache.querySelectorAll('.chart-line').forEach(function(line) {
+      var len = line.getTotalLength ? line.getTotalLength() : 0;
+      if (len > 0) { line.style.setProperty('--line-length', len + 'px'); line.style.animation = 'none'; line.offsetHeight; line.style.animation = ''; }
+    });
+    viewCache.querySelectorAll('.chart-area-fill').forEach(function(a) { a.style.animation = 'none'; a.offsetHeight; a.style.animation = ''; });
+  }
+
+  ${cacheView ? `// ── Cache helpers ──
+  function cacheStatusColor(s) { return s === 'healthy' ? '#a6e3a1' : s === 'warning' ? '#f9e2af' : '#f38ba8'; }
+  function cacheRatioColor(r) { return r >= 0.8 ? '#a6e3a1' : r >= 0.4 ? '#f9e2af' : '#f38ba8'; }
+
+  function filterCacheSessions(period) {
+    if (period === 0) return CACHE_SESSIONS.slice();
+    var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - period);
+    var cutoffMs = cutoff.getTime();
+    return CACHE_SESSIONS.filter(function(s) { return s.lastTs && new Date(s.lastTs).getTime() >= cutoffMs; });
+  }
+
+  function computeCacheAgg(sessions) {
+    var totalCreate = 0, totalRead = 0, healthy = 0, warning = 0, affected = 0, bug1 = 0, bug2 = 0;
+    var versionMap = {};
+    sessions.forEach(function(s) {
+      totalCreate += s.totalCreate; totalRead += s.totalRead;
+      if (s.status === 'healthy') healthy++; else if (s.status === 'warning') warning++; else affected++;
+      if (s.bug1Likely) bug1++; if (s.bug2Likely) bug2++;
+      var v = s.version || 'unknown';
+      if (!versionMap[v]) versionMap[v] = { sessions: 0, ratioSum: 0, affected: 0 };
+      versionMap[v].sessions++; versionMap[v].ratioSum += s.readRatio;
+      if (s.status === 'affected') versionMap[v].affected++;
+    });
+    var total = totalCreate + totalRead;
+    var ratio = total > 0 ? totalRead / total : 0;
+    var healthyPct = sessions.length > 0 ? healthy / sessions.length : 0;
+    var affPct = sessions.length > 0 ? affected / sessions.length : 0;
+    var wasted = Math.max(0, totalCreate - total * 0.05);
+    var verdict;
+    if (affPct > 0.3 || ratio < 0.5) verdict = 'SEVERELY_AFFECTED';
+    else if (affPct > 0.1 || ratio < 0.7) verdict = 'MODERATELY_AFFECTED';
+    else if (affected > 0) verdict = 'MILDLY_AFFECTED';
+    else verdict = 'NOT_AFFECTED';
+    // Daily ratios
+    var dayMap = {};
+    sessions.forEach(function(s) {
+      if (!s.firstTs) return;
+      var dk = s.firstTs.slice(0, 10);
+      if (!dayMap[dk]) dayMap[dk] = { create: 0, read: 0, sessions: 0 };
+      dayMap[dk].create += s.totalCreate; dayMap[dk].read += s.totalRead; dayMap[dk].sessions++;
+    });
+    var dailyRatios = Object.keys(dayMap).sort().map(function(d) {
+      var t = dayMap[d].create + dayMap[d].read;
+      return { date: d, ratio: t > 0 ? dayMap[d].read / t : 0, create: dayMap[d].create, read: dayMap[d].read, sessions: dayMap[d].sessions };
+    });
+    // Version breakdown sorted by session count
+    var versions = Object.keys(versionMap).map(function(v) {
+      return { version: v, sessions: versionMap[v].sessions, avgRatio: versionMap[v].ratioSum / versionMap[v].sessions, affected: versionMap[v].affected };
+    }).sort(function(a, b) { return b.sessions - a.sessions; });
+    return { totalCreate: totalCreate, totalRead: totalRead, total: total, ratio: ratio, healthy: healthy, warning: warning, affected: affected, healthyPct: healthyPct, bug1: bug1, bug2: bug2, wasted: wasted, verdict: verdict, dailyRatios: dailyRatios, versions: versions };
+  }
+
+  function verdictInfo(v) {
+    if (v === 'NOT_AFFECTED') return { text: 'Not Affected', color: '#a6e3a1', icon: '\\u2713' };
+    if (v === 'MILDLY_AFFECTED') return { text: 'Mildly Affected', color: '#f9e2af', icon: '\\u26A0' };
+    if (v === 'MODERATELY_AFFECTED') return { text: 'Moderately Affected', color: '#fab387', icon: '\\u26A0' };
+    return { text: 'Severely Affected', color: '#f38ba8', icon: '\\u2717' };
+  }
+
+  // ── SVG builders for cache view ──
+  function buildCacheChartSVG(dailyRatios, width, height) {
+    if (dailyRatios.length === 0) return '<div style="text-align:center;color:var(--text-tertiary);padding:40px">No data for this period</div>';
+    var pad = { top: 24, right: 16, bottom: 36, left: 52 };
+    var w = width - pad.left - pad.right, h = height - pad.top - pad.bottom;
+    var pts = dailyRatios.map(function(d, i) {
+      return { x: pad.left + (i / Math.max(dailyRatios.length - 1, 1)) * w, y: pad.top + h - (d.ratio * h) };
+    });
+    var linePath = smoothPath(pts, pad.top, pad.top + h);
+    var areaPath = smoothArea(pts, pad.top + h, pad.top);
+    var healthyY = pad.top + h - 0.8 * h, warningY = pad.top + h - 0.4 * h;
+    var grid = [0, 0.2, 0.4, 0.6, 0.8, 1.0].map(function(p) {
+      var y = pad.top + h - p * h;
+      return '<line x1="' + pad.left + '" y1="' + y + '" x2="' + (width - pad.right) + '" y2="' + y + '" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>' +
+        '<text x="' + (pad.left - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="rgba(255,255,255,0.35)" font-size="10">' + (p * 100).toFixed(0) + '%</text>';
+    }).join('');
+    var step = Math.max(1, Math.floor(pts.length / 7));
+    var xLabels = pts.filter(function(_, i) { return i % step === 0 || i === pts.length - 1; }).map(function(p) {
+      var idx = pts.indexOf(p);
+      return '<text x="' + p.x + '" y="' + (pad.top + h + 24) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">' + fmtDateShort(dailyRatios[idx].date) + '</text>';
+    }).join('');
+    var dots = pts.map(function(p, i) {
+      var d = dailyRatios[i];
+      return '<circle cx="' + p.x + '" cy="' + p.y + '" r="4" fill="' + cacheRatioColor(d.ratio) + '" stroke="#1e1e2e" stroke-width="1.5" class="data-dot" opacity="0.7"' +
+        ' data-tip-date="' + fmtDate(d.date) + '" data-tip-cost="Cache Hit: ' + (d.ratio * 100).toFixed(1) + '%" data-tip-msgs="Read: ' + fmtTokens(d.read) + ' / Create: ' + fmtTokens(d.create) + '" data-tip-tokens="' + d.sessions + ' sessions"/>';
+    }).join('');
+    return '<svg width="100%" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet" class="chart-svg">' +
+      '<defs><linearGradient id="cacheAreaGrad2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.25"/><stop offset="100%" stop-color="#a6e3a1" stop-opacity="0.02"/></linearGradient></defs>' +
+      grid +
+      '<rect x="' + pad.left + '" y="' + pad.top + '" width="' + w + '" height="' + (healthyY - pad.top) + '" fill="rgba(166,227,161,0.03)"/>' +
+      '<rect x="' + pad.left + '" y="' + healthyY + '" width="' + w + '" height="' + (warningY - healthyY) + '" fill="rgba(249,226,175,0.03)"/>' +
+      '<rect x="' + pad.left + '" y="' + warningY + '" width="' + w + '" height="' + (pad.top + h - warningY) + '" fill="rgba(243,139,168,0.03)"/>' +
+      '<line x1="' + pad.left + '" y1="' + healthyY + '" x2="' + (width - pad.right) + '" y2="' + healthyY + '" stroke="#a6e3a1" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>' +
+      '<line x1="' + pad.left + '" y1="' + warningY + '" x2="' + (width - pad.right) + '" y2="' + warningY + '" stroke="#f38ba8" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>' +
+      '<text x="' + (width - pad.right + 4) + '" y="' + (healthyY + 4) + '" fill="#a6e3a1" font-size="9" opacity="0.6">80%</text>' +
+      '<text x="' + (width - pad.right + 4) + '" y="' + (warningY + 4) + '" fill="#f38ba8" font-size="9" opacity="0.6">40%</text>' +
+      '<path d="' + areaPath + '" fill="url(#cacheAreaGrad2)" class="chart-area-fill"/>' +
+      '<path d="' + linePath + '" fill="none" stroke="#a6e3a1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="chart-line"/>' +
+      xLabels + dots + '</svg>';
+  }
+
+  function buildCacheDonutSVG(counts, size) {
+    var total = counts.healthy + counts.warning + counts.affected;
+    if (total === 0) return '';
+    var segs = [{ c: counts.healthy, color: '#a6e3a1' }, { c: counts.warning, color: '#f9e2af' }, { c: counts.affected, color: '#f38ba8' }].filter(function(s) { return s.c > 0; });
+    var cx = size / 2, cy = size / 2, r = size / 2 - 8, inner = r * 0.62;
+    var cum = -Math.PI / 2;
+    var arcs = segs.map(function(seg) {
+      var pct = seg.c / total, angle = pct * Math.PI * 2;
+      var sa = cum; cum += angle; var ea = cum;
+      var la = angle > Math.PI ? 1 : 0;
+      var x1 = cx + r * Math.cos(sa), y1 = cy + r * Math.sin(sa);
+      var x2 = cx + r * Math.cos(ea), y2 = cy + r * Math.sin(ea);
+      var ix1 = cx + inner * Math.cos(ea), iy1 = cy + inner * Math.sin(ea);
+      var ix2 = cx + inner * Math.cos(sa), iy2 = cy + inner * Math.sin(sa);
+      return '<path d="M' + x1 + ',' + y1 + ' A' + r + ',' + r + ' 0 ' + la + ',1 ' + x2 + ',' + y2 + ' L' + ix1 + ',' + iy1 + ' A' + inner + ',' + inner + ' 0 ' + la + ',0 ' + ix2 + ',' + iy2 + ' Z" fill="' + seg.color + '" opacity="0.85" class="donut-segment"/>';
+    }).join('');
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '" class="chart-svg">' + arcs +
+      '<text x="' + cx + '" y="' + (cy - 6) + '" text-anchor="middle" fill="#cdd6f4" font-size="16" font-weight="700">' + total + '</text>' +
+      '<text x="' + cx + '" y="' + (cy + 12) + '" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">SESSIONS</text></svg>';
+  }
+
+  function buildCacheGaugeSVG(ratio, size) {
+    var r = (size - 8) / 2, cx = size / 2, cy = size / 2;
+    var circ = 2 * Math.PI * r, off = circ * (1 - ratio);
+    var color = cacheRatioColor(ratio);
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="6"/>' +
+      '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="6" stroke-dasharray="' + circ + '" stroke-dashoffset="' + off + '" stroke-linecap="round" transform="rotate(-90 ' + cx + ' ' + cy + ')" style="transition:stroke-dashoffset 0.8s ease"/></svg>';
+  }
+
+  function buildCacheLegendHTML(counts, total) {
+    var items = [{ l: 'Healthy', c: counts.healthy, col: '#a6e3a1' }, { l: 'Warning', c: counts.warning, col: '#f9e2af' }, { l: 'Affected', c: counts.affected, col: '#f38ba8' }];
+    return items.map(function(i) {
+      return '<div class="legend-item"><span class="legend-dot" style="background:' + i.col + '"></span><span class="legend-name">' + i.l + '</span><span class="legend-val">' + i.c + '</span><span class="legend-pct">' + (total > 0 ? ((i.c / total) * 100).toFixed(0) : 0) + '%</span></div>';
+    }).join('');
+  }
+
+  function buildCacheVersionBarsHTML(versions) {
+    if (versions.length === 0) return '<div style="color:var(--text-tertiary);font-size:0.78rem">No version data</div>';
+    var maxS = Math.max.apply(null, versions.map(function(v) { return v.sessions; }).concat([1]));
+    return versions.slice(0, 8).map(function(v) {
+      var barPct = (v.sessions / maxS) * 100;
+      var rc = cacheRatioColor(v.avgRatio);
+      return '<div class="version-row"><span class="version-name">' + v.version + '</span><div class="version-bar-bg"><div class="version-bar-fill" style="width:' + barPct + '%;background:' + rc + '"></div></div><span class="version-ratio" style="color:' + rc + '">' + (v.avgRatio * 100).toFixed(1) + '%</span><span class="version-count">' + v.sessions + 's' + (v.affected > 0 ? ' <span style="color:#f38ba8">(' + v.affected + ' bad)</span>' : '') + '</span></div>';
+    }).join('');
+  }
+
+  // ── Full cache view update ──
+  function updateCacheView(period) {
+    var sessions = filterCacheSessions(period);
+    var agg = computeCacheAgg(sessions);
+    var vi = verdictInfo(agg.verdict);
+    var periodLabel = period === 0 ? 'All time' : 'Last ' + period + ' days';
+    var ratioColor = agg.ratio >= 0.8 ? 'var(--accent-green)' : agg.ratio >= 0.4 ? 'var(--accent-yellow)' : 'var(--accent-red)';
+
+    // Period label
+    var labelEl = document.getElementById('cache-period-label');
+    if (labelEl) labelEl.innerHTML = periodLabel + ' &middot; <span id="cache-session-count">' + sessions.length + '</span> sessions';
+
+    // Verdict
+    var vBanner = document.getElementById('cache-verdict');
+    var vTitle = document.getElementById('cache-verdict-title');
+    var vDesc = document.getElementById('cache-verdict-desc');
+    if (vBanner) { vBanner.style.background = 'linear-gradient(135deg,' + vi.color + '10,' + vi.color + '08)'; vBanner.style.borderColor = vi.color + '30'; }
+    if (vTitle) { vTitle.textContent = vi.text; vTitle.style.color = vi.color; }
+    if (vDesc) {
+      var ws = agg.wasted > 0 ? 'Estimated <span class="stat">~' + fmtTokens(Math.round(agg.wasted)) + '</span> wasted.' : 'No significant waste.';
+      vDesc.innerHTML = '<span class="stat">' + agg.affected + '/' + sessions.length + '</span> poor cache. Overall: <span class="stat">' + (agg.ratio * 100).toFixed(1) + '%</span>. ' + ws;
+    }
+
+    // KPIs
+    var el;
+    el = document.getElementById('cache-kpi-ratio'); if (el) { el.textContent = (agg.ratio * 100).toFixed(1) + '%'; el.style.color = ratioColor; }
+    el = document.getElementById('cache-kpi-ratio-sub'); if (el) el.textContent = fmtTokens(agg.totalRead) + ' read / ' + fmtTokens(agg.total) + ' total';
+    el = document.getElementById('cache-kpi-healthy'); if (el) el.textContent = (agg.healthyPct * 100).toFixed(1) + '%';
+    el = document.getElementById('cache-kpi-healthy-sub'); if (el) el.textContent = agg.healthy + ' healthy, ' + agg.warning + ' warn, ' + agg.affected + ' bad';
+    el = document.getElementById('cache-kpi-wasted'); if (el) { el.textContent = agg.wasted > 0 ? '~' + fmtTokens(Math.round(agg.wasted)) : '0'; el.style.color = agg.wasted > 0 ? 'var(--accent-red)' : 'var(--accent-green)'; }
+    el = document.getElementById('cache-kpi-bugs'); if (el) { el.textContent = agg.bug1 + agg.bug2; el.style.color = (agg.bug1 + agg.bug2) > 0 ? 'var(--accent-yellow)' : 'var(--accent-green)'; }
+    el = document.getElementById('cache-kpi-bugs-sub'); if (el) el.textContent = 'B1: ' + agg.bug1 + ' sentinel, B2: ' + agg.bug2 + ' resume';
+    el = document.getElementById('cache-bug1-count'); if (el) el.textContent = agg.bug1;
+    el = document.getElementById('cache-bug2-count'); if (el) el.textContent = agg.bug2;
+
+    // ── Trend chart ──
+    var chartContainer = document.getElementById('cache-chart-container');
+    var chartDays = document.getElementById('cache-chart-days');
+    if (chartContainer) chartContainer.innerHTML = buildCacheChartSVG(agg.dailyRatios, 700, 260);
+    if (chartDays) chartDays.textContent = agg.dailyRatios.length + ' days';
+
+    // ── Donut + legend ──
+    var donutArea = document.getElementById('cache-donut-area');
+    if (donutArea) {
+      var counts = { healthy: agg.healthy, warning: agg.warning, affected: agg.affected };
+      var total = sessions.length;
+      donutArea.innerHTML = buildCacheDonutSVG(counts, 140) + '<div class="legend" id="cache-legend">' + buildCacheLegendHTML(counts, total) + '</div>';
+    }
+
+    // ── Gauge ──
+    var gaugeRing = document.getElementById('cache-gauge-ring');
+    if (gaugeRing) {
+      gaugeRing.innerHTML = buildCacheGaugeSVG(agg.ratio, 90) +
+        '<div class="gauge-hero-pct"><span class="big" id="cache-gauge-pct" style="color:' + cacheRatioColor(agg.ratio) + '">' + (agg.ratio * 100).toFixed(0) + '</span><span class="label">hit %</span></div>';
+    }
+    el = document.getElementById('cache-agg-read'); if (el) el.innerHTML = 'Read: <strong>' + fmtTokens(agg.totalRead) + '</strong>';
+    el = document.getElementById('cache-agg-create'); if (el) el.innerHTML = 'Create: <strong>' + fmtTokens(agg.totalCreate) + '</strong>';
+
+    // ── Version bars ──
+    var versionsEl = document.getElementById('cache-versions');
+    var vBadge = document.getElementById('cache-version-badge');
+    if (versionsEl) versionsEl.innerHTML = buildCacheVersionBarsHTML(agg.versions);
+    if (vBadge) vBadge.textContent = agg.versions.length + ' versions';
+
+    // ── Tables ──
+    function buildTableRows(sorted, limit) {
+      return sorted.slice(0, limit).map(function(s) {
+        var bugs = '';
+        if (s.bug1Likely) bugs += '<span class="bug-tag b1">B1</span> ';
+        if (s.bug2Likely) bugs += '<span class="bug-tag b2">B2</span>';
+        var dateStr = s.firstTs ? new Date(s.firstTs).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + new Date(s.firstTs).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '?';
+        return '<tr><td style="color:' + cacheStatusColor(s.status) + '">' + (s.readRatio * 100).toFixed(1) + '%</td><td><span class="status-pill" style="background:' + cacheStatusColor(s.status) + '20;color:' + cacheStatusColor(s.status) + '">' + s.status + '</span></td><td>' + s.turns + '</td><td>' + fmtTokens(s.totalCreate) + '</td><td>' + fmtTokens(s.totalRead) + '</td><td>' + (s.version || '?') + '</td><td>' + dateStr + '</td><td>' + (bugs || '-') + '</td></tr>';
+      }).join('');
+    }
+    var worst = sessions.slice().sort(function(a, b) { return a.readRatio - b.readRatio; });
+    var best = sessions.slice().sort(function(a, b) { return b.readRatio - a.readRatio; });
+    var th = '<table class="session-table"><thead><tr><th>Ratio</th><th>Status</th><th>Turns</th><th>Created</th><th>Read</th><th>Version</th><th>Date</th><th>Bugs</th></tr></thead><tbody>';
+    var none = '<div style="color:var(--text-tertiary);font-size:0.78rem">No sessions in this period</div>';
+    el = document.getElementById('cache-worst-table'); if (el) el.innerHTML = sessions.length > 0 ? th + buildTableRows(worst, 15) + '</tbody></table>' : none;
+    el = document.getElementById('cache-best-table'); if (el) el.innerHTML = sessions.length > 0 ? th + buildTableRows(best, 10) + '</tbody></table>' : none;
+
+    // Animate new SVGs
+    animateCacheSVGs();
+  }
+
+  document.querySelectorAll('[data-cache-period]').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var period = parseInt(this.getAttribute('data-cache-period'));
+      document.querySelectorAll('[data-cache-period]').forEach(function(t) {
+        t.classList.toggle('active', parseInt(t.getAttribute('data-cache-period')) === period);
+      });
+      updateCacheView(period);
+    });
+  });
+  ` : ""}
+
+  // ── Live Session Monitor ──
+  function buildMiniSparkline(values, w, h, color, fillBelow) {
+    if (values.length < 2) return '';
+    var max = Math.max.apply(null, values.concat([0.01]));
+    var pts = values.map(function(v, i) {
+      return (i / (values.length - 1)) * w + ',' + (h - (v / max) * (h - 4));
+    }).join(' ');
+    var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" style="display:block">';
+    if (fillBelow) {
+      svg += '<polygon points="0,' + h + ' ' + pts + ' ' + w + ',' + h + '" fill="' + color + '" opacity="0.15"/>';
+    }
+    svg += '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>';
+    svg += '</svg>';
+    return svg;
+  }
+
+  function fmtElapsed(ms) {
+    var s = Math.floor(ms / 1000);
+    var m = Math.floor(s / 60); s = s % 60;
+    var h = Math.floor(m / 60); m = m % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+
+  window.addEventListener('message', function(event) {
+    var msg = event.data;
+    if (msg.type !== 'sessionUpdate') return;
+    var d = msg.data;
+    var el;
+    el = document.getElementById('live-project'); if (el) el.textContent = d.project ? d.project.split('/').pop() : '';
+    el = document.getElementById('live-elapsed'); if (el) el.textContent = d.messages > 0 ? fmtElapsed(d.elapsedMs) + ' \u00b7 ' + (d.model || '?') : 'Waiting for messages...';
+    el = document.getElementById('live-cost'); if (el) el.textContent = d.cost < 10 ? '$' + d.cost.toFixed(3) : '$' + d.cost.toFixed(1);
+    el = document.getElementById('live-msgs'); if (el) el.textContent = d.messages;
+    el = document.getElementById('live-input'); if (el) el.textContent = fmtTokens(d.inputTokens);
+    el = document.getElementById('live-output'); if (el) el.textContent = fmtTokens(d.outputTokens);
+    el = document.getElementById('live-cache-rate'); if (el) {
+      var pct = (d.cacheHitRate * 100).toFixed(1) + '%';
+      el.textContent = d.messages > 0 ? pct : '-';
+      el.style.color = d.cacheHitRate >= 0.8 ? 'var(--accent-green)' : d.cacheHitRate >= 0.4 ? 'var(--accent-yellow)' : d.messages > 0 ? 'var(--accent-red)' : 'var(--accent-teal)';
+    }
+    el = document.getElementById('live-cache-read'); if (el) el.textContent = d.messages > 0 ? fmtTokens(d.cacheRead) : '-';
+    // Sparklines
+    var sparkRow = document.getElementById('live-sparkline-row');
+    if (sparkRow && d.turnRatios && d.turnRatios.length >= 2) {
+      sparkRow.style.display = '';
+      var sw = sparkRow.offsetWidth / 2 - 60;
+      el = document.getElementById('live-sparkline-cache');
+      if (el) el.innerHTML = buildMiniSparkline(d.turnRatios, Math.max(sw, 100), 32, '#94e2d5', true);
+      el = document.getElementById('live-sparkline-cost');
+      if (el) el.innerHTML = buildMiniSparkline(d.turnCosts, Math.max(sw, 100), 32, '#a6e3a1', true);
+    }
+    // Pulse the dot
+    var dot = document.getElementById('live-dot');
+    if (dot) { dot.style.background = d.messages > 0 ? '#a6e3a1' : 'var(--text-tertiary)'; }
+  });
 
   // ── Initial chart listeners ──
   attachChartListeners();

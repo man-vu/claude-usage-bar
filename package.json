@@ -40,6 +40,10 @@
       {
         "command": "claudeUsageBar.scanToday",
         "title": "Claude Usage: Scan Today's Stats"
+      },
+      {
+        "command": "claudeUsageBar.showContextView",
+        "title": "Claude Usage: Show Context View"
       }
     ],
     "keybindings": [
@@ -52,6 +56,11 @@
         "command": "claudeUsageBar.refresh",
         "key": "ctrl+alt+r",
         "mac": "cmd+alt+r"
+      },
+      {
+        "command": "claudeUsageBar.showContextView",
+        "key": "ctrl+alt+x",
+        "mac": "cmd+alt+x"
       }
     ],
     "configuration": {
