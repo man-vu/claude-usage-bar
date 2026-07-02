@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { PROJECTS_DIR, decodeProjectName, normalizeModel, fmtTokens } from "./shared";
+import { PROJECTS_DIR, decodeProjectName, normalizeModel, fmtTokens, formatModelDisplay } from "./shared";
 
 // ── Constants (from Claude Code source: autoCompact.ts, tokens.ts) ──
 
@@ -10,11 +10,36 @@ const AUTOCOMPACT_BUFFER = 13_000;
 const MAX_OUTPUT_RESERVE = 20_000;
 const TOOL_OVERHEAD = 500;
 
+// Claude Code's default session window. Models marked 1M run with the full
+// window by default; the rest use Claude Code's 200k default unless the
+// session carries a [1m] marker.
 const CONTEXT_WINDOWS: Record<string, number> = {
+  "claude-fable-5": 1_000_000,
+  "claude-mythos-5": 1_000_000,
+  "claude-opus-4-8": 200_000,
+  "claude-opus-4-7": 200_000,
   "claude-opus-4-6": 200_000,
+  "claude-sonnet-5": 200_000,
   "claude-sonnet-4-6": 200_000,
   "claude-haiku-4-5": 200_000,
 };
+
+const WINDOW_TIERS = [200_000, 500_000, 1_000_000];
+
+/**
+ * Resolve the session's context window. The assumed window comes from the
+ * model table, but the API usage total is ground truth: a context can never
+ * exceed the real window, so if the observed total is larger the assumption
+ * is wrong (unknown/newer model) — bump to the next standard tier instead of
+ * displaying an impossible >100% usage.
+ */
+export function resolveContextWindow(model: string, is1MContext: boolean, apiTotal: number): number {
+  let window = is1MContext ? 1_000_000 : (CONTEXT_WINDOWS[model] ?? 200_000);
+  if (apiTotal > window) {
+    window = WINDOW_TIERS.find(t => t >= apiTotal) ?? Math.ceil(apiTotal / 100_000) * 100_000;
+  }
+  return window;
+}
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -164,20 +189,16 @@ function estMessageBlock(block: Record<string, unknown>): number {
 
 /**
  * Encode a workspace path to match Claude Code's project directory naming.
- * e.g. "D:/projects/foo" → "D--projects-foo" (or "d--projects-foo")
+ * Claude Code replaces every non-alphanumeric character with "-", so dots,
+ * underscores, and spaces encode too:
+ *   "D:\\projects\\man-vu.github.io" → "D--projects-man-vu-github-io"
+ *   "/home/user/foo"                 → "-home-user-foo"
  */
-function encodeWorkspacePath(wsPath: string): string {
-  // Normalize to forward slashes, strip trailing slash
-  const normalized = wsPath.replace(/\\/g, "/").replace(/\/$/, "");
-  // "D:/projects/foo" → drive="D", rest="projects-foo"
-  const match = normalized.match(/^([a-zA-Z]):\/(.+)$/);
-  if (match) {
-    const drive = match[1].toUpperCase();
-    const rest = match[2].replace(/\//g, "-");
-    return `${drive}--${rest}`;
-  }
-  // Unix paths: "/home/user/foo" → "-home-user-foo" — encode slashes as dashes
-  return normalized.replace(/\//g, "-").replace(/^-/, "");
+export function encodeWorkspacePath(wsPath: string): string {
+  return wsPath
+    .replace(/\\/g, "/")
+    .replace(/\/$/, "")
+    .replace(/[^a-zA-Z0-9]/g, "-");
 }
 
 function findLatestSession(workspacePath?: string): string | null {
@@ -196,7 +217,11 @@ function findLatestSession(workspacePath?: string): string | null {
     }
   }
 
-  // Search in target project dir, or fall back to all projects
+  // When a workspace was requested but has no matching project directory,
+  // return null rather than silently showing another project's session —
+  // that mismatch is exactly what makes the numbers look wrong vs /context.
+  if (workspacePath && !targetProjectDir) return null;
+
   const searchDirs = targetProjectDir
     ? [targetProjectDir]
     : fs.readdirSync(PROJECTS_DIR).map(p => path.join(PROJECTS_DIR, p));
@@ -252,17 +277,9 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
   }
   if (model.includes("[1m]")) { model = model.replace("[1m]", ""); is1MContext = true; }
 
-  const rawWindow = is1MContext ? 1_000_000 : (CONTEXT_WINDOWS[model] ?? 200_000);
-  const effectiveWindow = rawWindow - MAX_OUTPUT_RESERVE;
-  const autoCompactThreshold = effectiveWindow - AUTOCOMPACT_BUFFER;
-
-  // ── Model display ──
-  const modelBase = model;
-  const modelFamily = modelBase.includes("opus") ? "Opus" : modelBase.includes("sonnet") ? "Sonnet" : modelBase.includes("haiku") ? "Haiku" : modelBase;
-  const modelVer = modelBase.includes("4-6") ? "4.6" : modelBase.includes("4-5") ? "4.5" : "";
-  const modelDisplay = `${modelFamily}${modelVer ? " " + modelVer : ""}${is1MContext ? " (1M context)" : ""}`;
-
   // ── API usage (lives at m.message.usage in JSONL) ──
+  // Extracted before the window computation: the usage total is the ground
+  // truth the window resolver validates against.
   let apiUsage: ContextAnalysis["apiUsage"] = null;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
@@ -278,6 +295,17 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
       break;
     }
   }
+  const apiContextTotal = apiUsage
+    ? (apiUsage.input_tokens + apiUsage.cache_read_input_tokens + apiUsage.cache_creation_input_tokens)
+    : 0;
+
+  const rawWindow = resolveContextWindow(model, is1MContext, apiContextTotal);
+  const effectiveWindow = rawWindow - MAX_OUTPUT_RESERVE;
+  const autoCompactThreshold = effectiveWindow - AUTOCOMPACT_BUFFER;
+
+  // ── Model display ──
+  const modelBase = model;
+  const modelDisplay = `${formatModelDisplay(modelBase)}${rawWindow >= 1_000_000 ? " (1M context)" : ""}`;
 
   // ── Compact boundaries ──
   const compactBounds = msgs.map((m, i) => m.type === "system" && m.subtype === "compact_boundary" ? i : -1).filter(i => i >= 0);
@@ -336,14 +364,14 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
   const mcpLoadedTokens = mcpTools.filter(t => t.isLoaded).reduce((s, t) => s + t.tokens, 0);
   if (mcpLoadedTokens) categories.push({ name: "MCP tools", tokens: mcpLoadedTokens, color: COLORS.mcpTools });
 
-  // Deferred MCP tools: tool names + short descriptions still in context as deferred index
+  // Deferred tools appear in context only as names in the deferred-tool list —
+  // a schema stub costs a few tokens of list formatting, not a full schema.
   const mcpDeferredNames = deferredNames.filter(n => n.startsWith("mcp__"));
-  const mcpDeferredTokens = mcpDeferredNames.reduce((s, n) => s + est(n) + 250, 0); // ~250 tokens per deferred tool schema stub
+  const mcpDeferredTokens = mcpDeferredNames.reduce((s, n) => s + est(n) + 3, 0);
   if (mcpDeferredTokens) categories.push({ name: "MCP tools (deferred)", tokens: mcpDeferredTokens, color: "#666666", isDeferred: true });
 
-  // Deferred system tools (builtin tools that are deferred via tool search)
   const systemDeferredNames = deferredNames.filter(n => !n.startsWith("mcp__"));
-  const systemDeferredTokens = systemDeferredNames.reduce((s, n) => s + est(n) + 500, 0); // ~500 tokens per system tool
+  const systemDeferredTokens = systemDeferredNames.reduce((s, n) => s + est(n) + 3, 0);
   if (systemDeferredTokens) categories.push({ name: "System tools (deferred)", tokens: systemDeferredTokens, color: "#555555", isDeferred: true });
 
   // Custom agents — use real /context's typical value of ~4.7k
@@ -515,7 +543,7 @@ export function analyzeContext(workspacePath?: string): ContextAnalysis | null {
     }
   }
 
-  const reservedSq = reservedCats.reduce((s, c) => Math.max(1, Math.round((c.tokens / rawWindow) * totalSq)), 0);
+  const reservedSq = reservedCats.reduce((s, c) => s + Math.max(1, Math.round((c.tokens / rawWindow) * totalSq)), 0);
   const freeSq = Math.max(0, totalSq - gridSquares.length - reservedSq);
   for (let i = 0; i < freeSq; i++) gridSquares.push({ color: COLORS.reserved, symbol: "\u26B6", name: "Free space" });
   for (let i = 0; i < reservedSq && gridSquares.length < totalSq; i++) gridSquares.push({ color: COLORS.reserved, symbol: "\u26DD", name: "Autocompact buffer" });

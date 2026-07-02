@@ -51,8 +51,10 @@ export class ContextViewPanel {
 
 function errorHtml(): string {
   return `<!DOCTYPE html><html><body style="background:#1e1e1e;color:#ccc;font-family:monospace;padding:2em;">
-    <h2>No active conversation found</h2>
-    <p>Start a Claude Code session and try again.</p></body></html>`;
+    <h2>No Claude Code session found for this workspace</h2>
+    <p>Run Claude Code in this folder and try again. Sessions from other
+    workspaces are not shown here so the numbers always match this project's
+    <code>/context</code>.</p></body></html>`;
 }
 
 function buildHtml(d: ContextAnalysis): string {

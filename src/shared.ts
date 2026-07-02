@@ -4,15 +4,31 @@ import * as os from "os";
 
 // ── Model pricing per 1M tokens (API-equivalent costs) ──────────────
 
+// Rates from platform.claude.com pricing (verified 2026-07). Cache write = 1.25x
+// input (5m TTL), cache read = 0.1x input.
 export const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
-  "claude-opus-4-6": { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
-  "claude-opus-4-5": { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
+  "claude-fable-5": { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1 },
+  "claude-mythos-5": { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-opus-4-7": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-opus-4-6": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-opus-4-5": { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  "claude-sonnet-5": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
   "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
-  "claude-haiku-4-5": { input: 0.8, output: 4, cacheWrite: 1, cacheRead: 0.08 },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.1 },
 };
 
 export const DEFAULT_PRICING = { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
+
+/** "claude-fable-5" → "Fable 5", "claude-opus-4-8" → "Opus 4.8" — works for
+ *  any claude-{family}-{version} id so future models display sanely. */
+export function formatModelDisplay(model: string): string {
+  const m = model.match(/^claude-([a-z]+)-(\d+(?:-\d+)*)/);
+  if (!m) return model;
+  const family = m[1].charAt(0).toUpperCase() + m[1].slice(1);
+  return `${family} ${m[2].replace(/-/g, ".")}`;
+}
 
 export function normalizeModel(raw: string | undefined): string | null {
   if (!raw || raw === "<synthetic>" || !raw.startsWith("claude-")) return null;
